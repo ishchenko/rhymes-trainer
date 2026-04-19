@@ -30,6 +30,7 @@
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #D4C9B8; border-radius: 4px; }
+    body { overflow-x: hidden; }
 
     @keyframes pulse-ring {
       0% { box-shadow: 0 0 0 0 rgba(212, 90, 60, 0.4); }
@@ -424,229 +425,198 @@ function RecordScreen({ poem, onNext, onBack }) {
 /* ═══════════════════════════════════════════════════════
    SCREEN 3 — SEGMENT
 ═══════════════════════════════════════════════════════ */
-function SegmentScreen({ poem, audioBuffer, savedDividers, onNext, onBack }) {
+function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, savedTrimEnd, onNext, onBack }) {
   const n = poem.lines.length;
-  const [dividers, setDividers]   = useState(() => savedDividers || Array.from({length: n-1}, (_,i) => (i+1)/n));
-  const [playing, setPlaying]     = useState(null);
-  const [dragging, setDragging]   = useState(null);
-  const [loaded, setLoaded]       = useState(false);
+  const [dividers,  setDividers]  = useState(() => savedDividers  || Array.from({length:n-1},(_,i)=>(i+1)/n));
+  const [trimStart, setTrimStart] = useState(() => savedTrimStart ?? 0);
+  const [trimEnd,   setTrimEnd]   = useState(() => savedTrimEnd   ?? 1);
+  const [playing,   setPlaying]   = useState(null);
+  const [loaded,    setLoaded]    = useState(false);
   const canvasRef   = useRef(null);
   const audioCtxRef = useRef(null);
   const srcRef      = useRef(null);
-  const dragStartRef = useRef(null);
+  const dragging    = useRef(null); // 'start' | 'end' | number — не state, ref чтобы избежать stale closure
+  const stateRef    = useRef({});
+  stateRef.current  = { dividers, trimStart, trimEnd };
 
   const segColors = useMemo(() => [
-    'rgba(212,84,60,', 'rgba(74,148,144,', 'rgba(201,138,48,',
-    'rgba(116,112,160,', 'rgba(90,148,96,'
+    'rgba(212,84,60,','rgba(74,148,144,','rgba(201,138,48,',
+    'rgba(116,112,160,','rgba(90,148,96,'
   ], []);
 
-  useEffect(() => {
-    if (audioBuffer) { setLoaded(true); drawWaveform(dividers); }
-  }, [audioBuffer]);
-
-  useEffect(() => {
-    if (audioBuffer) drawWaveform(dividers);
-  }, [dividers, playing]);
-
-  const drawWaveform = (divs) => {
+  // Рисуем только волну + заливки + затемнение. Никаких ручек.
+  const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !audioBuffer) return;
+    const { dividers:divs, trimStart:ts, trimEnd:te } = stateRef.current;
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
-
     const data = audioBuffer.getChannelData(0);
     const step = Math.ceil(data.length / W);
-    const bounds = [0, ...divs, 1];
+    const bounds = [ts, ...divs, te];
 
-    // Segment fills
     for (let s = 0; s < n; s++) {
-      const x0 = bounds[s] * W, x1 = bounds[s+1] * W;
       const color = segColors[s % segColors.length];
-      ctx.fillStyle = playing === s ? color + '0.28)' : color + '0.11)';
-      ctx.fillRect(x0, 0, x1 - x0, H);
+      ctx.fillStyle = playing === s ? color+'0.28)' : color+'0.11)';
+      ctx.fillRect(bounds[s]*W, 0, (bounds[s+1]-bounds[s])*W, H);
     }
-
-    // Waveform bars
     for (let i = 0; i < W; i++) {
       let max = 0;
-      for (let j = 0; j < step; j++) {
-        const v = Math.abs(data[i * step + j] || 0);
-        if (v > max) max = v;
-      }
-      const barH = Math.max(2, max * H * 0.85);
-      const cx = i, cy = H / 2;
-      // Find which segment
-      const relX = i / W;
+      for (let j = 0; j < step; j++) { const v = Math.abs(data[i*step+j]||0); if(v>max) max=v; }
+      const barH = Math.max(2, max*H*0.85);
+      const relX = i/W;
+      const inTrim = relX >= ts && relX <= te;
       let seg = 0;
       for (let s = 0; s < n-1; s++) if (relX > divs[s]) seg = s+1;
-      ctx.fillStyle = playing === seg ? segColors[seg % segColors.length] + '0.9)' : C.muted + '80';
-      ctx.fillRect(cx, cy - barH/2, 1, barH);
+      ctx.fillStyle = inTrim ? (playing===seg ? segColors[seg%segColors.length]+'0.9)' : C.muted+'80') : C.muted+'28';
+      ctx.fillRect(i, H/2 - barH/2, 1, barH);
     }
+    ctx.fillStyle = 'rgba(42,37,32,0.22)';
+    ctx.fillRect(0, 0, ts*W, H);
+    ctx.fillRect(te*W, 0, W-te*W, H);
+  }, [audioBuffer, playing, n, segColors]);
 
-    // Dividers
-    divs.forEach((d, i) => {
-      const x = d * W;
-      ctx.strokeStyle = C.text;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-      ctx.setLineDash([]);
-      // handle
-      const handleR = 10;
-      const handleY = H / 2;
-      ctx.fillStyle = C.text;
-      ctx.beginPath(); ctx.arc(x, handleY, handleR, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle = 'white';
-      ctx.beginPath(); ctx.arc(x, handleY, 5, 0, Math.PI*2); ctx.fill();
-    });
+  useEffect(() => { if (audioBuffer) { setLoaded(true); drawWaveform(); } }, [audioBuffer]);
+  useEffect(() => { drawWaveform(); }, [dividers, trimStart, trimEnd, playing, drawWaveform]);
 
-    // Segment number labels
-    ctx.font = '700 12px Nunito, sans-serif';
-    ctx.textAlign = 'center';
-    for (let s = 0; s < n; s++) {
-      const cx = (bounds[s] + bounds[s+1]) / 2 * W;
-      ctx.fillStyle = playing === s ? segColors[s % segColors.length] + '1)' : C.muted;
-      ctx.fillText(s + 1, cx, 15);
-    }
-  };
+  // Drag — document-уровень, stateRef для актуальных значений
+  useEffect(() => {
+    const getX = (clientX) => {
+      const c = canvasRef.current; if (!c) return 0;
+      const r = c.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    };
+    const move = (clientX) => {
+      const tgt = dragging.current; if (tgt === null) return;
+      const x = getX(clientX);
+      const { dividers:divs, trimStart:ts, trimEnd:te } = stateRef.current;
+      if (tgt === 'start') {
+        const max = divs.length ? divs[0]-0.04 : te-0.08;
+        setTrimStart(Math.max(0, Math.min(max, x)));
+      } else if (tgt === 'end') {
+        const min = divs.length ? divs[divs.length-1]+0.04 : ts+0.08;
+        setTrimEnd(Math.max(min, Math.min(1, x)));
+      } else {
+        const lo = tgt > 0 ? divs[tgt-1]+0.04 : ts+0.04;
+        const hi = tgt < divs.length-1 ? divs[tgt+1]-0.04 : te-0.04;
+        const nd = [...divs]; nd[tgt] = Math.max(lo, Math.min(hi, x));
+        setDividers(nd);
+      }
+    };
+    const onUp = () => { dragging.current = null; };
+    const onMouseMove = e => move(e.clientX);
+    const onTouchMove = e => { e.preventDefault(); move(e.touches[0].clientX); };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onUp);
+    document.addEventListener('touchmove', onTouchMove, { passive:false });
+    document.addEventListener('touchend', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onUp);
+    };
+  }, []);
 
-  const getRelX = (e) => {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    return (clientX - rect.left) / rect.width;
-  };
-
-  const onPointerDown = (e) => {
-    const x = getRelX(e);
-    let best = -1, bestDist = 0.06;
-    dividers.forEach((d, i) => {
-      const dist = Math.abs(d - x);
-      if (dist < bestDist) { bestDist = dist; best = i; }
-    });
-    if (best >= 0) { setDragging(best); dragStartRef.current = x; e.preventDefault(); }
-  };
-
-  const onPointerMove = (e) => {
-    if (dragging === null) return;
-    const x = getRelX(e);
-    const lo = dragging > 0 ? dividers[dragging-1] + 0.04 : 0.04;
-    const hi = dragging < dividers.length-1 ? dividers[dragging+1] - 0.04 : 0.96;
-    const nd = [...dividers];
-    nd[dragging] = Math.max(lo, Math.min(hi, x));
-    setDividers(nd);
-    e.preventDefault();
-  };
-
-  const onPointerUp = () => setDragging(null);
+  const startDrag = (e, tgt) => { e.preventDefault(); dragging.current = tgt; };
 
   const getAudioCtx = () => {
-    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
-      audioCtxRef.current = new AudioContext();
-    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+    if (!audioCtxRef.current || audioCtxRef.current.state==='closed') audioCtxRef.current = new AudioContext();
+    if (audioCtxRef.current.state==='suspended') audioCtxRef.current.resume();
     return audioCtxRef.current;
   };
-
-  const stopAudio = () => {
-    try { srcRef.current?.stop(); } catch {}
-    srcRef.current = null;
-    setPlaying(null);
-  };
-
+  const stopAudio = () => { try { srcRef.current?.stop(); } catch {} srcRef.current=null; setPlaying(null); };
   const playSegment = (idx) => {
-    stopAudio();
-    if (!audioBuffer) return;
-    if (playing === idx) return;
-    const bounds = [0, ...dividers, 1];
-    const dur = audioBuffer.duration;
-    const start = bounds[idx] * dur;
-    const length = (bounds[idx+1] - bounds[idx]) * dur;
-    const ac = getAudioCtx();
-    const src = ac.createBufferSource();
-    src.buffer = audioBuffer;
-    src.connect(ac.destination);
-    src.start(0, start, length);
-    src.onended = () => setPlaying(p => p === idx ? null : p);
-    srcRef.current = src;
-    setPlaying(idx);
+    stopAudio(); if (!audioBuffer || playing===idx) return;
+    const bounds=[trimStart,...dividers,trimEnd], dur=audioBuffer.duration;
+    const ac=getAudioCtx(), src=ac.createBufferSource();
+    src.buffer=audioBuffer; src.connect(ac.destination);
+    src.start(0, bounds[idx]*dur, (bounds[idx+1]-bounds[idx])*dur);
+    src.onended = () => setPlaying(p => p===idx ? null : p);
+    srcRef.current=src; setPlaying(idx);
   };
-
   const saveAndNext = () => {
     stopAudio();
-    const bounds = [0, ...dividers, 1];
-    const dur = audioBuffer.duration;
-    const segs = poem.lines.map((_, i) => ({
-      start: bounds[i] * dur,
-      end:   bounds[i+1] * dur,
-    }));
-    onNext(segs, dividers);
+    const bounds=[trimStart,...dividers,trimEnd], dur=audioBuffer.duration;
+    const segs=poem.lines.map((_,i)=>({ start:bounds[i]*dur, end:bounds[i+1]*dur }));
+    onNext(segs, dividers, trimStart, trimEnd);
   };
 
-  return (
-    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
-                  maxWidth:600, margin:'0 auto', padding:'20px 20px 40px', gap:16 }}>
-      <BackBtn onClick={() => { stopAudio(); onBack(); }} />
-      <StepHeader step={3} total={3} label="Разметка" />
+  // DOM-ручка (делитель или обрезка)
+  const Handle = ({ pos, color, label, dragKey, size=22 }) => (
+    <div onMouseDown={e=>startDrag(e,dragKey)} onTouchStart={e=>startDrag(e,dragKey)}
+      style={{ position:'absolute', top:0, bottom:0, left:`${pos*100}%`,
+               transform:'translateX(-50%)', width:32, cursor:'ew-resize',
+               touchAction:'none', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2 }}>
+      <div style={{ position:'absolute', top:0, bottom:0, width:2, background:color, opacity:0.7 }} />
+      <div style={{ width:size, height:size, borderRadius:'50%', background:color,
+                    border:'2.5px solid white', boxShadow:'0 1px 4px rgba(0,0,0,0.25)',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    fontSize:11, color:'white', fontWeight:800, position:'relative' }}>
+        {label}
+      </div>
+    </div>
+  );
 
-      <div style={{ textAlign:'center', marginBottom:4 }}>
-        <p style={{ fontSize:14, color:C.muted, fontWeight:600 }}>
-          Перетащи метки, чтобы границы совпали с паузами между строками
+  const col2 = { gridColumn:2, padding:'0 20px' };
+
+  return (
+    <div style={{ minHeight:'100vh', display:'grid',
+                  gridTemplateColumns:'1fr min(600px,100%) 1fr', alignContent:'start' }}>
+
+      <div style={{ ...col2, paddingTop:20, paddingBottom:4 }}>
+        <BackBtn onClick={()=>{ stopAudio(); onBack(); }} />
+        <StepHeader step={3} total={3} label="Разметка" />
+        <p style={{ fontSize:13, color:C.muted, fontWeight:600, textAlign:'center', marginBottom:12 }}>
+          Янтарные края — обрезка · тёмные метки — границы строк
         </p>
       </div>
 
-      {/* Waveform canvas */}
-      <div style={{ borderRadius:18, overflow:'hidden', background:C.card,
-                    border:`2px solid ${C.border}`, flexShrink:0 }}>
+      {/* Волна на всю ширину, ручки — DOM поверх канваса */}
+      <div style={{ gridColumn:'1 / -1', position:'relative',
+                    background:C.card, borderTop:`2px solid ${C.border}`, borderBottom:`2px solid ${C.border}` }}>
         {!loaded && (
-          <div style={{ height:130, display:'flex', alignItems:'center', justifyContent:'center',
-                        color:C.muted, fontSize:14, fontWeight:600 }}>
-            Загрузка аудио…
-          </div>
+          <div style={{ height:180, display:'flex', alignItems:'center', justifyContent:'center',
+                        color:C.muted, fontSize:14, fontWeight:600 }}>Загрузка аудио…</div>
         )}
-        <canvas ref={canvasRef} width={560} height={130}
-          style={{ display:'block', width:'100%', height:130,
-                   cursor: dragging !== null ? 'ew-resize' : 'grab',
-                   touchAction:'none', opacity: loaded ? 1 : 0 }}
-          onMouseDown={onPointerDown} onMouseMove={onPointerMove}
-          onMouseUp={onPointerUp} onMouseLeave={onPointerUp}
-          onTouchStart={onPointerDown} onTouchMove={onPointerMove} onTouchEnd={onPointerUp}
-        />
+        <canvas ref={canvasRef} width={1200} height={180}
+          style={{ display:'block', width:'100%', height:180, touchAction:'none', opacity:loaded?1:0 }} />
+
+        {loaded && <>
+          <Handle pos={trimStart} color={C.amber} label="◁" dragKey="start" size={24} />
+          {dividers.map((d,i) => (
+            <Handle key={i} pos={d} color={C.text} label="" dragKey={i} size={20} />
+          ))}
+          <Handle pos={trimEnd} color={C.amber} label="▷" dragKey="end" size={24} />
+        </>}
       </div>
 
-      {/* Lines list */}
-      <div style={{ display:'flex', flexDirection:'column', gap:8, flex:1, overflowY:'auto' }}>
-        {poem.lines.map((line, i) => {
-          const active = playing === i;
-          const color = segColors[i % segColors.length];
+      <div style={{ ...col2, paddingTop:16, display:'flex', flexDirection:'column', gap:8 }}>
+        {poem.lines.map((line,i) => {
+          const active=playing===i, color=segColors[i%segColors.length];
           return (
-            <button key={i} onClick={() => active ? stopAudio() : playSegment(i)}
-              style={{ display:'flex', alignItems:'center', gap:12, padding:'14px 16px',
-                       background: active ? color + '0.14)' : C.card,
-                       border: `2px solid ${active ? color+'0.7)' : C.border}`,
-                       borderRadius:15, cursor:'pointer', textAlign:'left',
-                       transition:'all 0.15s' }}>
-              <span style={{ width:28, height:28, borderRadius:8, background: color + '0.18)',
+            <button key={i} onClick={()=>active?stopAudio():playSegment(i)}
+              style={{ display:'flex', alignItems:'center', gap:12, padding:'14px 16px', width:'100%',
+                       background:active?color+'0.14)':C.card, border:`2px solid ${active?color+'0.7)':C.border}`,
+                       borderRadius:15, cursor:'pointer', textAlign:'left', transition:'all 0.15s' }}>
+              <span style={{ width:28, height:28, borderRadius:8, background:color+'0.18)',
                              display:'flex', alignItems:'center', justifyContent:'center',
-                             fontSize:13, fontWeight:800, color: color + '1)', flexShrink:0 }}>
-                {i+1}
-              </span>
-              <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.4 }}>
-                {line}
-              </span>
-              <span style={{ fontSize:18, color: active ? color+'1)' : C.muted }}>
-                {active ? '⏹' : '▶'}
-              </span>
+                             fontSize:13, fontWeight:800, color:color+'1)', flexShrink:0 }}>{i+1}</span>
+              <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.4 }}>{line}</span>
+              <span style={{ fontSize:18, color:active?color+'1)':C.muted }}>{active?'⏹':'▶'}</span>
             </button>
           );
         })}
       </div>
 
-      <button onClick={saveAndNext}
-        style={{ padding:'18px', fontSize:17, fontWeight:800, background:C.coral, color:'white',
-                 border:'none', borderRadius:18, cursor:'pointer', marginTop:4 }}>
-        Перейти к практике →
-      </button>
+      <div style={{ ...col2, paddingTop:12, paddingBottom:40 }}>
+        <button onClick={saveAndNext}
+          style={{ width:'100%', padding:'18px', fontSize:17, fontWeight:800,
+                   background:C.coral, color:'white', border:'none', borderRadius:18, cursor:'pointer' }}>
+          Перейти к практике →
+        </button>
+      </div>
     </div>
   );
 }
@@ -907,6 +877,8 @@ function App() {
   const [audioBuffer, setAudioBuffer] = useState(null);
   const [segments,    setSegments]    = useState(null);
   const [dividers,    setDividers]    = useState(null);
+  const [trimStart,   setTrimStart]   = useState(null);
+  const [trimEnd,     setTrimEnd]     = useState(null);
 
   // Restore last session
   useEffect(() => {
@@ -914,8 +886,10 @@ function App() {
       const s = JSON.parse(localStorage.getItem('pt-session') || 'null');
       if (s?.poem) {
         setPoem(s.poem);
-        if (s.segments) setSegments(s.segments);
-        if (s.dividers) setDividers(s.dividers);
+        if (s.segments)  setSegments(s.segments);
+        if (s.dividers)  setDividers(s.dividers);
+        if (s.trimStart != null) setTrimStart(s.trimStart);
+        if (s.trimEnd   != null) setTrimEnd(s.trimEnd);
         if (s.screen && s.screen !== 'input') setScreen(s.screen);
       }
     } catch {}
@@ -923,8 +897,8 @@ function App() {
 
   // Persist session
   useEffect(() => {
-    if (poem) localStorage.setItem('pt-session', JSON.stringify({ poem, screen, segments, dividers }));
-  }, [poem, screen, segments, dividers]);
+    if (poem) localStorage.setItem('pt-session', JSON.stringify({ poem, screen, segments, dividers, trimStart, trimEnd }));
+  }, [poem, screen, segments, dividers, trimStart, trimEnd]);
 
   // Load audio when we need it
   useEffect(() => {
@@ -942,7 +916,7 @@ function App() {
   const go = (scr) => setScreen(scr);
 
   if (screen === 'input') return (
-    <InputScreen onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); setDividers(null); go('record'); }} />
+    <InputScreen onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); setDividers(null); setTrimStart(null); setTrimEnd(null); go('record'); }} />
   );
 
   if (screen === 'record') return (
@@ -956,8 +930,9 @@ function App() {
   );
 
   if (screen === 'segment') return (
-    <SegmentScreen poem={poem} audioBuffer={audioBuffer} savedDividers={dividers}
-      onNext={(segs, divs) => { setSegments(segs); setDividers(divs); go('practice'); }}
+    <SegmentScreen poem={poem} audioBuffer={audioBuffer}
+      savedDividers={dividers} savedTrimStart={trimStart} savedTrimEnd={trimEnd}
+      onNext={(segs, divs, ts, te) => { setSegments(segs); setDividers(divs); setTrimStart(ts); setTrimEnd(te); go('practice'); }}
       onBack={() => go('record')} />
   );
 
