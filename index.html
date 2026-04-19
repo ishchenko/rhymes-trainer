@@ -667,15 +667,22 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
    SCREEN 4 — PRACTICE
 ═══════════════════════════════════════════════════════ */
 function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
-  const [playing,   setPlaying]   = useState(null); // null | 'all' | 'sel' | idx
-  const [activeIdx, setActiveIdx] = useState(null);
-  const [selected,  setSelected]  = useState(new Set());
-  const [selMode,   setSelMode]   = useState(false);
-  const [repeatAll, setRepeatAll] = useState(false);
+  const [playing,    setPlaying]   = useState(null); // null | 'all' | 'sel' | idx
+  const [activeIdx,  setActiveIdx] = useState(null);
+  const [selected,   setSelected]  = useState(new Set());
+  const [repeatAll,  setRepeatAll] = useState(false);
+  const [repeatSel,  setRepeatSel] = useState(false);
 
-  const audioCtxRef = useRef(null);
-  const srcRef      = useRef(null);
-  const rafRef      = useRef(null);
+  const audioCtxRef  = useRef(null);
+  const srcRef       = useRef(null);
+  const srcsRef      = useRef([]); // все активные source-узлы
+  const rafRef       = useRef(null);
+  const stoppingRef  = useRef(false);
+  const repeatAllRef = useRef(false);
+  const repeatSelRef = useRef(false);
+
+  useEffect(() => { repeatAllRef.current = repeatAll; }, [repeatAll]);
+  useEffect(() => { repeatSelRef.current = repeatSel; }, [repeatSel]);
 
   useEffect(() => () => { stopAll(); }, []);
 
@@ -687,8 +694,10 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
   };
 
   const stopAll = () => {
+    stoppingRef.current = true;
     cancelAnimationFrame(rafRef.current);
-    try { srcRef.current?.stop(); } catch {}
+    srcsRef.current.forEach(s => { try { s.stop(); } catch {} });
+    srcsRef.current = [];
     srcRef.current = null;
     setPlaying(null); setActiveIdx(null);
   };
@@ -707,11 +716,12 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
 
   const playSequence = (indices, tag) => {
     stopAll();
+    stoppingRef.current = false;
     if (!audioBuffer || !indices.length) return;
     const ac = getCtx();
     setPlaying(tag);
+    srcsRef.current = [];
 
-    // Schedule all segments back-to-back
     let when = ac.currentTime;
     const timings = [];
     indices.forEach(idx => {
@@ -721,13 +731,15 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
       const src = ac.createBufferSource();
       src.buffer = audioBuffer; src.connect(ac.destination);
       src.start(when, seg.start, dur);
+      srcsRef.current.push(src);
       if (idx === indices[indices.length - 1]) {
         src.onended = () => {
-          if (repeatAll && tag === 'all') { playSequence(indices, tag); return; }
+          if (stoppingRef.current) { stoppingRef.current = false; return; }
+          if (tag === 'all' && repeatAllRef.current) { playSequence(indices, tag); return; }
+          if (tag === 'sel' && repeatSelRef.current) { playSequence(indices, tag); return; }
           setPlaying(null); setActiveIdx(null);
         };
       }
-      srcRef.current = src; // keep last source for stop
       when += dur;
     });
 
@@ -748,8 +760,19 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
   };
 
   const toggleSelect = (i) => {
-    const s = new Set(selected);
-    s.has(i) ? s.delete(i) : s.add(i);
+    if (selected.size === 0) { setSelected(new Set([i])); return; }
+    const arr = [...selected].sort((a,b)=>a-b);
+    const min = arr[0], max = arr[arr.length-1];
+    const s = new Set();
+    if (i >= min && i <= max) {
+      // Клик на последнюю строку — снимаем её; клик выше — сужаем до i
+      const newMax = (i === max) ? max - 1 : i;
+      if (newMax < min) { setSelected(new Set()); return; }
+      for (let j = min; j <= newMax; j++) s.add(j);
+    } else {
+      // Снаружи: расширяем, заполняя пробел
+      for (let j = Math.min(min,i); j <= Math.max(max,i); j++) s.add(j);
+    }
     setSelected(s);
   };
 
@@ -758,7 +781,9 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
     'rgba(116,112,160,', 'rgba(90,148,96,'
   ];
 
-  const allSelected = selected.size === poem.lines.length;
+  const selArr = [...selected].sort((a,b)=>a-b);
+  const selMin = selArr[0], selMax = selArr[selArr.length-1];
+  const n = poem.lines.length;
 
   return (
     <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
@@ -772,111 +797,104 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
         </button>
       </div>
 
-      {/* Title + mode toggle */}
       <div className="anim-slide-up" style={{ textAlign:'center', marginBottom:18 }}>
-        <h2 style={{ fontSize:22, fontWeight:900, color:C.text, marginBottom:12 }}>{poem.title}</h2>
-        <div style={{ display:'inline-flex', background:C.light, borderRadius:14, padding:3, gap:3 }}>
-          {[['lines', 'По строкам'], ['select', 'Выбрать']].map(([v, label]) => (
-            <button key={v}
-              onClick={() => { setSelMode(v === 'select'); setSelected(new Set()); stopAll(); }}
-              style={{ padding:'8px 18px', fontSize:14, fontWeight:700, border:'none', borderRadius:11,
-                       cursor:'pointer', transition:'all 0.2s',
-                       background: (!selMode && v === 'lines') || (selMode && v === 'select') ? 'white' : 'transparent',
-                       color: (!selMode && v === 'lines') || (selMode && v === 'select') ? C.text : C.muted,
-                       boxShadow: (!selMode && v === 'lines') || (selMode && v === 'select') ? '0 1px 4px rgba(0,0,0,0.1)' : 'none' }}>
-              {label}
-            </button>
-          ))}
-        </div>
+        <h2 style={{ fontSize:22, fontWeight:900, color:C.text }}>{poem.title}</h2>
       </div>
 
       {/* Lines */}
-      <div style={{ flex:1, overflowY:'auto', display:'flex', flexDirection:'column',
-                    gap:9, paddingBottom:130 }}>
-        {poem.lines.map((line, i) => {
-          const isActive = activeIdx === i;
-          const isSel    = selected.has(i);
-          const color    = segColors[i % segColors.length];
-          return (
-            <div key={i}
-              className={isActive ? 'anim-pop' : ''}
-              onClick={() => selMode ? toggleSelect(i) : (playing === i ? stopAll() : playSingle(i))}
-              style={{ display:'flex', alignItems:'center', gap:12, padding:'15px 16px',
-                       background: isActive ? color + '0.18)' : isSel ? color + '0.1)' : C.card,
-                       border:`2px solid ${isActive ? color+'0.8)' : isSel ? color+'0.5)' : C.border}`,
-                       borderRadius:16, cursor:'pointer', transition:'all 0.18s',
-                       transform: isActive ? 'scale(1.015)' : 'scale(1)' }}>
-              {/* Number badge */}
-              <div style={{ width:32, height:32, borderRadius:9, flexShrink:0,
-                            background: color + (isActive ? '0.3)' : '0.15)'),
-                            display:'flex', alignItems:'center', justifyContent:'center',
-                            fontSize:14, fontWeight:900, color: color + '1)' }}>
-                {i+1}
+      <div style={{ flex:1, overflowY:'auto', paddingBottom:110,
+                    display:'flex', flexDirection:'column', gap:9, paddingLeft:4 }}>
+        {(() => {
+          const midRow = selected.size > 0 ? selMin : -1;
+          const showPanel = selected.size > 0;
+          return poem.lines.map((line, i) => {
+            const isActive  = activeIdx === i;
+            const isSel     = selected.has(i);
+            const color     = segColors[i % segColors.length];
+            const isPlaying = playing === i;
+            const isMid     = i === midRow;
+            return (
+              <div key={i} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                {/* Кнопка воспроизведения одной строки */}
+                <button onClick={() => isPlaying ? stopAll() : playSingle(i)}
+                  style={{ width:40, height:40, borderRadius:'50%', flexShrink:0, border:'none',
+                           background: isPlaying ? color+'0.85)' : C.light,
+                           color: isPlaying ? 'white' : C.muted, cursor:'pointer', fontSize:14,
+                           display:'flex', alignItems:'center', justifyContent:'center',
+                           boxShadow: isActive ? `0 0 0 3px ${color}0.35)` : 'none',
+                           transition:'all 0.15s' }}>
+                  {isPlaying ? '⏹' : '▶'}
+                </button>
+
+                {/* Карточка строки */}
+                <div onClick={() => toggleSelect(i)}
+                  style={{ flex:1, display:'flex', alignItems:'center', gap:12, padding:'14px 16px',
+                           background: isActive ? color+'0.18)' : isSel ? color+'0.1)' : C.card,
+                           border:`2px solid ${isActive ? color+'0.8)' : isSel ? color+'0.4)' : C.border}`,
+                           borderRadius:16, cursor:'pointer', transition:'background 0.15s, border-color 0.15s' }}>
+                  <div style={{ width:30, height:30, borderRadius:8, flexShrink:0,
+                                background: color+(isActive?'0.3)':'0.15)'),
+                                display:'flex', alignItems:'center', justifyContent:'center',
+                                fontSize:13, fontWeight:900, color:color+'1)' }}>
+                    {i+1}
+                  </div>
+                  <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.45 }}>
+                    {line}
+                  </span>
+                  <div style={{ width:22, height:22, borderRadius:6, flexShrink:0,
+                                border:`2.5px solid ${isSel ? color+'1)' : C.border}`,
+                                background: isSel ? color+'0.15)' : 'transparent',
+                                display:'flex', alignItems:'center', justifyContent:'center',
+                                fontSize:13, fontWeight:900, color:color+'1)', transition:'all 0.15s' }}>
+                    {isSel ? '✓' : ''}
+                  </div>
+                </div>
+
+                {/* Панель справа: место зарезервировано всегда когда есть выделение,
+                    кнопки видны только на средней строке — без прыжков высоты */}
+                <div style={{ width:72, flexShrink:0, display:'flex',
+                              alignItems:'center', gap:6,
+                              opacity: isMid ? 1 : 0, pointerEvents: isMid ? 'auto' : 'none' }}>
+                  <button onClick={() => playing==='sel' ? stopAll() : playSequence(selArr,'sel')}
+                    style={{ width:36, height:36, borderRadius:'50%', flexShrink:0, border:'none',
+                             background: playing==='sel' ? C.teal : C.teal+'CC',
+                             color:'white', cursor:'pointer', fontSize:14,
+                             display:'flex', alignItems:'center', justifyContent:'center',
+                             boxShadow:'0 1px 6px rgba(74,148,144,0.4)' }}>
+                    {playing==='sel' ? '⏹' : '▶'}
+                  </button>
+                  <button onClick={() => setRepeatSel(r=>!r)}
+                    style={{ width:30, height:30, borderRadius:'50%', flexShrink:0, border:'none',
+                             background: repeatSel ? C.amber : C.light,
+                             color: repeatSel ? 'white' : C.muted,
+                             cursor:'pointer', fontSize:13,
+                             display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    🔁
+                  </button>
+                </div>
               </div>
-              {/* Text */}
-              <span style={{ flex:1, fontSize:16, fontWeight:600, color:C.text,
-                             lineHeight:1.45, textWrap:'pretty' }}>
-                {line}
-              </span>
-              {/* Action icon */}
-              {!selMode && (
-                <div style={{ width:32, height:32, borderRadius:9, flexShrink:0,
-                              background: isActive ? color+'0.2)' : C.light,
-                              display:'flex', alignItems:'center', justifyContent:'center',
-                              fontSize:15 }}>
-                  {isActive ? '⏹' : '▶'}
-                </div>
-              )}
-              {selMode && (
-                <div style={{ width:24, height:24, borderRadius:7, flexShrink:0,
-                              border:`2.5px solid ${isSel ? color+'1)' : C.border}`,
-                              background: isSel ? color+'0.15)' : 'transparent',
-                              display:'flex', alignItems:'center', justifyContent:'center',
-                              fontSize:14, fontWeight:800, color: color+'1)' }}>
-                  {isSel ? '✓' : ''}
-                </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          });
+        })()}
       </div>
 
       {/* Bottom bar */}
       <div style={{ position:'fixed', bottom:0, left:0, right:0, zIndex:10 }}>
         <div style={{ maxWidth:600, margin:'0 auto', padding:'12px 20px 32px',
                       background:`linear-gradient(to bottom, transparent, ${C.bg} 28%)` }}>
-          {selMode && (
-            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
-              <button
-                onClick={() => setSelected(allSelected ? new Set() : new Set(poem.lines.map((_,i)=>i)))}
-                style={{ fontSize:13, fontWeight:700, color:C.teal, background:'none', border:'none',
-                         cursor:'pointer', padding:'4px 0' }}>
-                {allSelected ? 'Снять всё' : 'Выбрать всё'}
-              </button>
-              {selected.size > 0 && (
-                <button onClick={() => playSequence([...selected].sort((a,b)=>a-b), 'sel')}
-                  style={{ flex:1, padding:'14px', fontSize:15, fontWeight:800,
-                           background:C.teal, color:'white', border:'none', borderRadius:15, cursor:'pointer' }}>
-                  ▶ Играть выбранное ({selected.size})
-                </button>
-              )}
-            </div>
-          )}
-
           <div style={{ display:'flex', gap:10 }}>
-            <button onClick={() => { setRepeatAll(r => !r); }}
+            <button onClick={() => { setRepeatAll(r=>!r); }}
               style={{ width:52, height:52, borderRadius:14, flexShrink:0,
                        background: repeatAll ? C.amber : C.light, color: repeatAll ? 'white' : C.muted,
-                       border:'none', cursor:'pointer', fontSize:20, display:'flex',
-                       alignItems:'center', justifyContent:'center' }}
-              title={repeatAll ? 'Повтор включён' : 'Повтор выключен'}>
+                       border:'none', cursor:'pointer', fontSize:20,
+                       display:'flex', alignItems:'center', justifyContent:'center' }}>
               🔁
             </button>
-            <button onClick={() => playing === 'all' ? stopAll() : playSequence(poem.lines.map((_,i)=>i), 'all')}
+            <button onClick={() => playing==='all' ? stopAll() : playSequence(poem.lines.map((_,i)=>i), 'all')}
               style={{ flex:1, padding:'15px', fontSize:17, fontWeight:800,
-                       background: playing === 'all' ? '#b03222' : C.coral, color:'white',
+                       background: playing==='all' ? '#b03222' : C.coral, color:'white',
                        border:'none', borderRadius:15, cursor:'pointer', transition:'background 0.2s' }}>
-              {playing === 'all' ? '⏹ Стоп' : '▶ Играть всё'}
+              {playing==='all' ? '⏹ Стоп' : '▶ Играть всё'}
             </button>
           </div>
         </div>
