@@ -424,9 +424,9 @@ function RecordScreen({ poem, onNext, onBack }) {
 /* ═══════════════════════════════════════════════════════
    SCREEN 3 — SEGMENT
 ═══════════════════════════════════════════════════════ */
-function SegmentScreen({ poem, audioBuffer, onNext, onBack }) {
+function SegmentScreen({ poem, audioBuffer, savedDividers, onNext, onBack }) {
   const n = poem.lines.length;
-  const [dividers, setDividers]   = useState(() => Array.from({length: n-1}, (_,i) => (i+1)/n));
+  const [dividers, setDividers]   = useState(() => savedDividers || Array.from({length: n-1}, (_,i) => (i+1)/n));
   const [playing, setPlaying]     = useState(null);
   const [dragging, setDragging]   = useState(null);
   const [loaded, setLoaded]       = useState(false);
@@ -580,7 +580,7 @@ function SegmentScreen({ poem, audioBuffer, onNext, onBack }) {
       start: bounds[i] * dur,
       end:   bounds[i+1] * dur,
     }));
-    onNext(segs);
+    onNext(segs, dividers);
   };
 
   return (
@@ -906,6 +906,7 @@ function App() {
   const [poem,        setPoem]        = useState(null);
   const [audioBuffer, setAudioBuffer] = useState(null);
   const [segments,    setSegments]    = useState(null);
+  const [dividers,    setDividers]    = useState(null);
 
   // Restore last session
   useEffect(() => {
@@ -914,6 +915,7 @@ function App() {
       if (s?.poem) {
         setPoem(s.poem);
         if (s.segments) setSegments(s.segments);
+        if (s.dividers) setDividers(s.dividers);
         if (s.screen && s.screen !== 'input') setScreen(s.screen);
       }
     } catch {}
@@ -921,8 +923,8 @@ function App() {
 
   // Persist session
   useEffect(() => {
-    if (poem) localStorage.setItem('pt-session', JSON.stringify({ poem, screen, segments }));
-  }, [poem, screen, segments]);
+    if (poem) localStorage.setItem('pt-session', JSON.stringify({ poem, screen, segments, dividers }));
+  }, [poem, screen, segments, dividers]);
 
   // Load audio when we need it
   useEffect(() => {
@@ -940,7 +942,7 @@ function App() {
   const go = (scr) => setScreen(scr);
 
   if (screen === 'input') return (
-    <InputScreen onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); go('record'); }} />
+    <InputScreen onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); setDividers(null); go('record'); }} />
   );
 
   if (screen === 'record') return (
@@ -954,8 +956,8 @@ function App() {
   );
 
   if (screen === 'segment') return (
-    <SegmentScreen poem={poem} audioBuffer={audioBuffer}
-      onNext={segs => { setSegments(segs); go('practice'); }}
+    <SegmentScreen poem={poem} audioBuffer={audioBuffer} savedDividers={dividers}
+      onNext={(segs, divs) => { setSegments(segs); setDividers(divs); go('practice'); }}
       onBack={() => go('record')} />
   );
 
