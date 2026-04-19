@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Тренер стихов</title>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: 'Nunito', sans-serif;
+      background: #F5F0E8;
+      color: #2A2520;
+      -webkit-font-smoothing: antialiased;
+    }
+    #root { height: 100%; }
+
+    input, textarea, button {
+      font-family: 'Nunito', sans-serif;
+    }
+    input:focus, textarea:focus {
+      outline: none;
+    }
+    button:active { opacity: 0.85; }
+
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #D4C9B8; border-radius: 4px; }
+
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(212, 90, 60, 0.4); }
+      70% { box-shadow: 0 0 0 20px rgba(212, 90, 60, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(212, 90, 60, 0); }
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    @keyframes slide-up {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes pop {
+      0% { transform: scale(0.92); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .anim-slide-up { animation: slide-up 0.35s ease both; }
+    .anim-pop { animation: pop 0.3s cubic-bezier(.34,1.56,.64,1) both; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ─── Palette ─────────────────────────────────────────── */
+const C = {
+  bg:     '#F5F0E8',
+  card:   '#FDFAF4',
+  border: '#E4DDD0',
+  text:   '#2A2520',
+  muted:  '#8C7F72',
+  coral:  '#D4543C',
+  teal:   '#4A9490',
+  amber:  '#C98A30',
+  green:  '#5A9460',
+  lavender:'#7470A0',
+  light:  '#EDE8DC',
+};
+
+/* ─── IndexedDB for audio blobs ────────────────────────── */
+const DB = (() => {
+  let _db = null;
+  const open = () => new Promise((res, rej) => {
+    if (_db) return res(_db);
+    const r = indexedDB.open('poem-trainer-v2', 1);
+    r.onupgradeneeded = e => e.target.result.createObjectStore('recs');
+    r.onsuccess = e => { _db = e.target.result; res(_db); };
+    r.onerror = rej;
+  });
+  return {
+    save: async (k, v) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction('recs', 'readwrite');
+        tx.objectStore('recs').put(v, k);
+        tx.oncomplete = res; tx.onerror = rej;
+      });
+    },
+    load: async (k) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction('recs', 'readonly');
+        const r = tx.objectStore('recs').get(k);
+        r.onsuccess = e => res(e.target.result);
+        r.onerror = rej;
+      });
+    },
+  };
+})();
+
+/* ─── Helpers ──────────────────────────────────────────── */
+const fmtTime = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 1 — INPUT
+═══════════════════════════════════════════════════════ */
+function InputScreen({ onNext }) {
+  const [title, setTitle] = useState('');
+  const [text, setText] = useState('');
+  const [saved, setSaved] = useState([]);
+
+  useEffect(() => {
+    try { setSaved(JSON.parse(localStorage.getItem('pt-poems') || '[]')); } catch {}
+  }, []);
+
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const valid = title.trim() && lines.length >= 2;
+
+  const go = () => {
+    if (!valid) return;
+    const poem = { id: Date.now().toString(), title: title.trim(), lines };
+    const list = JSON.parse(localStorage.getItem('pt-poems') || '[]');
+    const idx = list.findIndex(p => p.title === poem.title);
+    if (idx >= 0) list[idx] = poem; else list.unshift(poem);
+    localStorage.setItem('pt-poems', JSON.stringify(list.slice(0, 15)));
+    onNext(poem);
+  };
+
+  const load = (p) => { setTitle(p.title); setText(p.lines.join('\n')); };
+
+  return (
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
+                  padding:'44px 24px 48px', maxWidth:600, margin:'0 auto' }}>
+      {/* Header */}
+      <div className="anim-slide-up" style={{ textAlign:'center', marginBottom:40 }}>
+        <div style={{ fontSize:62, marginBottom:10, lineHeight:1 }}>🎙️</div>
+        <h1 style={{ fontSize:34, fontWeight:900, color:C.text, letterSpacing:'-0.5px', marginBottom:6 }}>
+          Тренер стихов
+        </h1>
+        <p style={{ fontSize:15, color:C.muted, fontWeight:600 }}>
+          Записывай, размечай, слушай — и запоминай!
+        </p>
+      </div>
+
+      {/* Form */}
+      <div className="anim-slide-up" style={{ width:'100%', display:'flex', flexDirection:'column', gap:14,
+                        animationDelay:'0.06s' }}>
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && document.querySelector('textarea')?.focus()}
+          placeholder="Название стихотворения"
+          style={{ padding:'16px 18px', fontSize:18, fontWeight:700, border:`2px solid ${C.border}`,
+                   borderRadius:18, background:C.card, color:C.text, width:'100%',
+                   transition:'border-color 0.2s' }}
+          onFocus={e => e.target.style.borderColor = C.coral}
+          onBlur={e => e.target.style.borderColor = C.border}
+        />
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder={"Введи строки стиха,\nкаждая строка — с новой строки..."}
+          rows={8}
+          style={{ padding:'16px 18px', fontSize:16, fontWeight:500, border:`2px solid ${C.border}`,
+                   borderRadius:18, background:C.card, color:C.text, resize:'vertical', lineHeight:1.75,
+                   transition:'border-color 0.2s' }}
+          onFocus={e => e.target.style.borderColor = C.coral}
+          onBlur={e => e.target.style.borderColor = C.border}
+        />
+        {lines.length > 0 && (
+          <p style={{ fontSize:13, color:C.muted, fontWeight:600, textAlign:'right' }}>
+            {lines.length} {lines.length === 1 ? 'строка' : lines.length < 5 ? 'строки' : 'строк'}
+          </p>
+        )}
+        <button
+          onClick={go}
+          disabled={!valid}
+          style={{ padding:'18px', fontSize:18, fontWeight:900, background: valid ? C.coral : C.border,
+                   color: valid ? 'white' : C.muted, border:'none', borderRadius:18, cursor: valid ? 'pointer' : 'default',
+                   transition:'all 0.2s', letterSpacing:'0.02em' }}>
+          Записать стих →
+        </button>
+      </div>
+
+      {/* Saved poems */}
+      {saved.length > 0 && (
+        <div style={{ width:'100%', marginTop:36 }} className="anim-slide-up" style2={{ animationDelay:'0.12s' }}>
+          <p style={{ fontSize:12, fontWeight:800, color:C.muted, textTransform:'uppercase',
+                      letterSpacing:'0.1em', marginBottom:12 }}>Недавние стихи</p>
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            {saved.map(p => (
+              <button key={p.id} onClick={() => load(p)}
+                style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+                         padding:'14px 18px', background:C.card, border:`2px solid ${C.border}`,
+                         borderRadius:14, cursor:'pointer', color:C.text, textAlign:'left',
+                         transition:'border-color 0.15s' }}
+                onMouseEnter={e => e.currentTarget.style.borderColor = C.teal}
+                onMouseLeave={e => e.currentTarget.style.borderColor = C.border}>
+                <span style={{ fontSize:15, fontWeight:700 }}>{p.title}</span>
+                <span style={{ fontSize:13, color:C.muted, fontWeight:600 }}>{p.lines.length} строк</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 2 — RECORD
+═══════════════════════════════════════════════════════ */
+function RecordScreen({ poem, onNext, onBack }) {
+  const [phase, setPhase] = useState('ready'); // ready | recording | done
+  const [seconds, setSeconds] = useState(0);
+  const [audioBlob, setAudioBlob] = useState(null);
+  const [audioUrl, setAudioUrl]  = useState(null);
+  const [error, setError]        = useState('');
+
+  const mrRef        = useRef(null);
+  const chunksRef    = useRef([]);
+  const timerRef     = useRef(null);
+  const streamRef    = useRef(null);
+  const analyserRef  = useRef(null);
+  const canvasRef    = useRef(null);
+  const rafRef       = useRef(null);
+
+  useEffect(() => {
+    DB.load(poem.id).then(blob => {
+      if (blob) {
+        setAudioBlob(blob);
+        setAudioUrl(URL.createObjectURL(blob));
+        setPhase('done');
+      }
+    });
+    return cleanup;
+  }, []);
+
+  const cleanup = () => {
+    clearInterval(timerRef.current);
+    cancelAnimationFrame(rafRef.current);
+    streamRef.current?.getTracks().forEach(t => t.stop());
+  };
+
+  const drawLoop = () => {
+    if (!analyserRef.current || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const buf = new Uint8Array(analyserRef.current.frequencyBinCount);
+    const draw = () => {
+      rafRef.current = requestAnimationFrame(draw);
+      analyserRef.current.getByteTimeDomainData(buf);
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      // background gradient
+      const grad = ctx.createLinearGradient(0, 0, W, 0);
+      grad.addColorStop(0,   'rgba(212,84,60,0.08)');
+      grad.addColorStop(0.5, 'rgba(212,84,60,0.16)');
+      grad.addColorStop(1,   'rgba(212,84,60,0.08)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = C.coral;
+      ctx.beginPath();
+      const sw = W / buf.length;
+      for (let i = 0; i < buf.length; i++) {
+        const x = i * sw;
+        const y = (buf[i] / 128) * (H / 2);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    };
+    draw();
+  };
+
+  const startRec = async () => {
+    setError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const ac = new AudioContext();
+      const src = ac.createMediaStreamSource(stream);
+      const an = ac.createAnalyser(); an.fftSize = 512;
+      src.connect(an); analyserRef.current = an;
+      drawLoop();
+
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const mr = new MediaRecorder(stream, { mimeType: mime });
+      chunksRef.current = [];
+      mr.ondataavailable = e => e.data.size && chunksRef.current.push(e.data);
+      mr.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        await DB.save(poem.id, blob);
+        setAudioBlob(blob);
+        setAudioUrl(URL.createObjectURL(blob));
+        setPhase('done');
+        cancelAnimationFrame(rafRef.current);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mr.start(100);
+      mrRef.current = mr;
+      setSeconds(0);
+      setPhase('recording');
+      timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+    } catch (e) {
+      setError('Не удалось включить микрофон: ' + e.message);
+    }
+  };
+
+  const stopRec = () => {
+    if (mrRef.current?.state !== 'inactive') mrRef.current.stop();
+    clearInterval(timerRef.current);
+  };
+
+  const reRecord = () => {
+    setAudioBlob(null); setAudioUrl(null);
+    setPhase('ready'); setSeconds(0);
+  };
+
+  const segColors = [C.coral, C.teal, C.amber, C.lavender, C.green];
+
+  return (
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
+                  maxWidth:600, margin:'0 auto', padding:'20px 22px 48px' }}>
+      <BackBtn onClick={onBack} />
+
+      <StepHeader step={2} total={3} label="Запись" />
+
+      {/* Poem preview */}
+      <div className="anim-slide-up"
+        style={{ background:C.card, borderRadius:20, padding:'20px 22px',
+                 border:`2px solid ${C.border}`, marginBottom:24 }}>
+        <p style={{ fontSize:16, fontWeight:800, color:C.text, marginBottom:12 }}>{poem.title}</p>
+        <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+          {poem.lines.map((line, i) => (
+            <div key={i} style={{ display:'flex', alignItems:'baseline', gap:10 }}>
+              <span style={{ fontSize:11, fontWeight:800, color:segColors[i % segColors.length],
+                             minWidth:18, opacity:0.7 }}>{i+1}</span>
+              <span style={{ fontSize:15, fontWeight:500, color:C.text, lineHeight:1.55 }}>{line}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center',
+                    justifyContent:'center', gap:20 }}>
+        {phase !== 'done' && (
+          <canvas ref={canvasRef} width={480} height={90}
+            style={{ width:'100%', maxWidth:440, height:90, borderRadius:14,
+                     background:C.card, border:`2px solid ${C.border}`,
+                     opacity: phase === 'recording' ? 1 : 0.4, transition:'opacity 0.3s' }} />
+        )}
+
+        {phase !== 'done' && (
+          <div style={{ fontSize:42, fontWeight:900, color:C.text, letterSpacing:'0.04em',
+                        fontVariantNumeric:'tabular-nums' }}>
+            {fmtTime(seconds)}
+          </div>
+        )}
+
+        {phase === 'ready' && (
+          <button onClick={startRec}
+            style={{ display:'flex', alignItems:'center', gap:14, padding:'20px 40px',
+                     fontSize:20, fontWeight:800, background:C.coral, color:'white',
+                     border:'none', borderRadius:50, cursor:'pointer',
+                     animation: 'pulse-ring 2s infinite' }}>
+            <span style={{ width:18, height:18, borderRadius:'50%', background:'white',
+                           boxShadow:'0 0 0 4px rgba(255,255,255,0.3)', flexShrink:0 }} />
+            Записать
+          </button>
+        )}
+
+        {phase === 'recording' && (
+          <button onClick={stopRec}
+            style={{ display:'flex', alignItems:'center', gap:14, padding:'20px 40px',
+                     fontSize:20, fontWeight:800, background:'#b03222', color:'white',
+                     border:'none', borderRadius:50, cursor:'pointer' }}>
+            <span style={{ width:16, height:16, borderRadius:3, background:'white', flexShrink:0,
+                           animation:'blink 1s infinite' }} />
+            Остановить
+          </button>
+        )}
+
+        {phase === 'done' && (
+          <div className="anim-pop" style={{ display:'flex', flexDirection:'column',
+                                            alignItems:'center', gap:16, width:'100%' }}>
+            <div style={{ fontSize:48 }}>✅</div>
+            <p style={{ fontSize:20, fontWeight:800, color:C.green }}>Запись сохранена!</p>
+            {audioUrl && (
+              <audio controls src={audioUrl}
+                style={{ width:'100%', maxWidth:380, borderRadius:12 }} />
+            )}
+            <div style={{ display:'flex', gap:12, width:'100%', maxWidth:380 }}>
+              <button onClick={reRecord}
+                style={{ flex:1, padding:'15px 10px', fontSize:15, fontWeight:700,
+                         background:C.light, color:C.text, border:'none', borderRadius:14, cursor:'pointer' }}>
+                🔄 Перезаписать
+              </button>
+              <button onClick={() => onNext(audioBlob)}
+                style={{ flex:2, padding:'15px 18px', fontSize:16, fontWeight:800,
+                         background:C.teal, color:'white', border:'none', borderRadius:14, cursor:'pointer' }}>
+                Разметить →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <p style={{ fontSize:14, color:C.coral, fontWeight:600, textAlign:'center', maxWidth:300 }}>{error}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 3 — SEGMENT
+═══════════════════════════════════════════════════════ */
+function SegmentScreen({ poem, audioBuffer, onNext, onBack }) {
+  const n = poem.lines.length;
+  const [dividers, setDividers]   = useState(() => Array.from({length: n-1}, (_,i) => (i+1)/n));
+  const [playing, setPlaying]     = useState(null);
+  const [dragging, setDragging]   = useState(null);
+  const [loaded, setLoaded]       = useState(false);
+  const canvasRef   = useRef(null);
+  const audioCtxRef = useRef(null);
+  const srcRef      = useRef(null);
+  const dragStartRef = useRef(null);
+
+  const segColors = useMemo(() => [
+    'rgba(212,84,60,', 'rgba(74,148,144,', 'rgba(201,138,48,',
+    'rgba(116,112,160,', 'rgba(90,148,96,'
+  ], []);
+
+  useEffect(() => {
+    if (audioBuffer) { setLoaded(true); drawWaveform(dividers); }
+  }, [audioBuffer]);
+
+  useEffect(() => {
+    if (audioBuffer) drawWaveform(dividers);
+  }, [dividers, playing]);
+
+  const drawWaveform = (divs) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !audioBuffer) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const data = audioBuffer.getChannelData(0);
+    const step = Math.ceil(data.length / W);
+    const bounds = [0, ...divs, 1];
+
+    // Segment fills
+    for (let s = 0; s < n; s++) {
+      const x0 = bounds[s] * W, x1 = bounds[s+1] * W;
+      const color = segColors[s % segColors.length];
+      ctx.fillStyle = playing === s ? color + '0.28)' : color + '0.11)';
+      ctx.fillRect(x0, 0, x1 - x0, H);
+    }
+
+    // Waveform bars
+    for (let i = 0; i < W; i++) {
+      let max = 0;
+      for (let j = 0; j < step; j++) {
+        const v = Math.abs(data[i * step + j] || 0);
+        if (v > max) max = v;
+      }
+      const barH = Math.max(2, max * H * 0.85);
+      const cx = i, cy = H / 2;
+      // Find which segment
+      const relX = i / W;
+      let seg = 0;
+      for (let s = 0; s < n-1; s++) if (relX > divs[s]) seg = s+1;
+      ctx.fillStyle = playing === seg ? segColors[seg % segColors.length] + '0.9)' : C.muted + '80';
+      ctx.fillRect(cx, cy - barH/2, 1, barH);
+    }
+
+    // Dividers
+    divs.forEach((d, i) => {
+      const x = d * W;
+      ctx.strokeStyle = C.text;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.setLineDash([]);
+      // handle
+      const handleR = 10;
+      const handleY = H / 2;
+      ctx.fillStyle = C.text;
+      ctx.beginPath(); ctx.arc(x, handleY, handleR, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = 'white';
+      ctx.beginPath(); ctx.arc(x, handleY, 5, 0, Math.PI*2); ctx.fill();
+    });
+
+    // Segment number labels
+    ctx.font = '700 12px Nunito, sans-serif';
+    ctx.textAlign = 'center';
+    for (let s = 0; s < n; s++) {
+      const cx = (bounds[s] + bounds[s+1]) / 2 * W;
+      ctx.fillStyle = playing === s ? segColors[s % segColors.length] + '1)' : C.muted;
+      ctx.fillText(s + 1, cx, 15);
+    }
+  };
+
+  const getRelX = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    return (clientX - rect.left) / rect.width;
+  };
+
+  const onPointerDown = (e) => {
+    const x = getRelX(e);
+    let best = -1, bestDist = 0.06;
+    dividers.forEach((d, i) => {
+      const dist = Math.abs(d - x);
+      if (dist < bestDist) { bestDist = dist; best = i; }
+    });
+    if (best >= 0) { setDragging(best); dragStartRef.current = x; e.preventDefault(); }
+  };
+
+  const onPointerMove = (e) => {
+    if (dragging === null) return;
+    const x = getRelX(e);
+    const lo = dragging > 0 ? dividers[dragging-1] + 0.04 : 0.04;
+    const hi = dragging < dividers.length-1 ? dividers[dragging+1] - 0.04 : 0.96;
+    const nd = [...dividers];
+    nd[dragging] = Math.max(lo, Math.min(hi, x));
+    setDividers(nd);
+    e.preventDefault();
+  };
+
+  const onPointerUp = () => setDragging(null);
+
+  const getAudioCtx = () => {
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
+      audioCtxRef.current = new AudioContext();
+    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+    return audioCtxRef.current;
+  };
+
+  const stopAudio = () => {
+    try { srcRef.current?.stop(); } catch {}
+    srcRef.current = null;
+    setPlaying(null);
+  };
+
+  const playSegment = (idx) => {
+    stopAudio();
+    if (!audioBuffer) return;
+    if (playing === idx) return;
+    const bounds = [0, ...dividers, 1];
+    const dur = audioBuffer.duration;
+    const start = bounds[idx] * dur;
+    const length = (bounds[idx+1] - bounds[idx]) * dur;
+    const ac = getAudioCtx();
+    const src = ac.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ac.destination);
+    src.start(0, start, length);
+    src.onended = () => setPlaying(p => p === idx ? null : p);
+    srcRef.current = src;
+    setPlaying(idx);
+  };
+
+  const saveAndNext = () => {
+    stopAudio();
+    const bounds = [0, ...dividers, 1];
+    const dur = audioBuffer.duration;
+    const segs = poem.lines.map((_, i) => ({
+      start: bounds[i] * dur,
+      end:   bounds[i+1] * dur,
+    }));
+    onNext(segs);
+  };
+
+  return (
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
+                  maxWidth:600, margin:'0 auto', padding:'20px 20px 40px', gap:16 }}>
+      <BackBtn onClick={() => { stopAudio(); onBack(); }} />
+      <StepHeader step={3} total={3} label="Разметка" />
+
+      <div style={{ textAlign:'center', marginBottom:4 }}>
+        <p style={{ fontSize:14, color:C.muted, fontWeight:600 }}>
+          Перетащи метки, чтобы границы совпали с паузами между строками
+        </p>
+      </div>
+
+      {/* Waveform canvas */}
+      <div style={{ borderRadius:18, overflow:'hidden', background:C.card,
+                    border:`2px solid ${C.border}`, flexShrink:0 }}>
+        {!loaded && (
+          <div style={{ height:130, display:'flex', alignItems:'center', justifyContent:'center',
+                        color:C.muted, fontSize:14, fontWeight:600 }}>
+            Загрузка аудио…
+          </div>
+        )}
+        <canvas ref={canvasRef} width={560} height={130}
+          style={{ display:'block', width:'100%', height:130,
+                   cursor: dragging !== null ? 'ew-resize' : 'grab',
+                   touchAction:'none', opacity: loaded ? 1 : 0 }}
+          onMouseDown={onPointerDown} onMouseMove={onPointerMove}
+          onMouseUp={onPointerUp} onMouseLeave={onPointerUp}
+          onTouchStart={onPointerDown} onTouchMove={onPointerMove} onTouchEnd={onPointerUp}
+        />
+      </div>
+
+      {/* Lines list */}
+      <div style={{ display:'flex', flexDirection:'column', gap:8, flex:1, overflowY:'auto' }}>
+        {poem.lines.map((line, i) => {
+          const active = playing === i;
+          const color = segColors[i % segColors.length];
+          return (
+            <button key={i} onClick={() => active ? stopAudio() : playSegment(i)}
+              style={{ display:'flex', alignItems:'center', gap:12, padding:'14px 16px',
+                       background: active ? color + '0.14)' : C.card,
+                       border: `2px solid ${active ? color+'0.7)' : C.border}`,
+                       borderRadius:15, cursor:'pointer', textAlign:'left',
+                       transition:'all 0.15s' }}>
+              <span style={{ width:28, height:28, borderRadius:8, background: color + '0.18)',
+                             display:'flex', alignItems:'center', justifyContent:'center',
+                             fontSize:13, fontWeight:800, color: color + '1)', flexShrink:0 }}>
+                {i+1}
+              </span>
+              <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.4 }}>
+                {line}
+              </span>
+              <span style={{ fontSize:18, color: active ? color+'1)' : C.muted }}>
+                {active ? '⏹' : '▶'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <button onClick={saveAndNext}
+        style={{ padding:'18px', fontSize:17, fontWeight:800, background:C.coral, color:'white',
+                 border:'none', borderRadius:18, cursor:'pointer', marginTop:4 }}>
+        Перейти к практике →
+      </button>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 4 — PRACTICE
+═══════════════════════════════════════════════════════ */
+function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
+  const [playing,   setPlaying]   = useState(null); // null | 'all' | 'sel' | idx
+  const [activeIdx, setActiveIdx] = useState(null);
+  const [selected,  setSelected]  = useState(new Set());
+  const [selMode,   setSelMode]   = useState(false);
+  const [repeatAll, setRepeatAll] = useState(false);
+
+  const audioCtxRef = useRef(null);
+  const srcRef      = useRef(null);
+  const rafRef      = useRef(null);
+
+  useEffect(() => () => { stopAll(); }, []);
+
+  const getCtx = () => {
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
+      audioCtxRef.current = new AudioContext();
+    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+    return audioCtxRef.current;
+  };
+
+  const stopAll = () => {
+    cancelAnimationFrame(rafRef.current);
+    try { srcRef.current?.stop(); } catch {}
+    srcRef.current = null;
+    setPlaying(null); setActiveIdx(null);
+  };
+
+  const playSingle = (idx) => {
+    stopAll();
+    if (!audioBuffer) return;
+    const ac = getCtx();
+    const seg = segments[idx];
+    const src = ac.createBufferSource();
+    src.buffer = audioBuffer; src.connect(ac.destination);
+    src.start(0, seg.start, seg.end - seg.start);
+    src.onended = () => { setPlaying(null); setActiveIdx(null); };
+    srcRef.current = src; setPlaying(idx); setActiveIdx(idx);
+  };
+
+  const playSequence = (indices, tag) => {
+    stopAll();
+    if (!audioBuffer || !indices.length) return;
+    const ac = getCtx();
+    setPlaying(tag);
+
+    // Schedule all segments back-to-back
+    let when = ac.currentTime;
+    const timings = [];
+    indices.forEach(idx => {
+      const seg = segments[idx];
+      const dur = seg.end - seg.start;
+      timings.push({ idx, when, dur });
+      const src = ac.createBufferSource();
+      src.buffer = audioBuffer; src.connect(ac.destination);
+      src.start(when, seg.start, dur);
+      if (idx === indices[indices.length - 1]) {
+        src.onended = () => {
+          if (repeatAll && tag === 'all') { playSequence(indices, tag); return; }
+          setPlaying(null); setActiveIdx(null);
+        };
+      }
+      srcRef.current = src; // keep last source for stop
+      when += dur;
+    });
+
+    // Animate active index
+    const startTime = ac.currentTime;
+    const track = () => {
+      const elapsed = ac.currentTime - startTime;
+      for (let i = 0; i < timings.length; i++) {
+        const t = timings[i];
+        if (elapsed >= t.when - startTime && elapsed < t.when - startTime + t.dur) {
+          setActiveIdx(t.idx);
+          break;
+        }
+      }
+      rafRef.current = requestAnimationFrame(track);
+    };
+    track();
+  };
+
+  const toggleSelect = (i) => {
+    const s = new Set(selected);
+    s.has(i) ? s.delete(i) : s.add(i);
+    setSelected(s);
+  };
+
+  const segColors = [
+    'rgba(212,84,60,', 'rgba(74,148,144,', 'rgba(201,138,48,',
+    'rgba(116,112,160,', 'rgba(90,148,96,'
+  ];
+
+  const allSelected = selected.size === poem.lines.length;
+
+  return (
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column',
+                  maxWidth:600, margin:'0 auto', padding:'20px 20px 0' }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+        <BackBtn onClick={() => { stopAll(); onBack(); }} />
+        <button onClick={() => { stopAll(); onReSegment(); }}
+          style={{ background:'none', border:'none', fontSize:13, color:C.muted,
+                   fontWeight:700, cursor:'pointer', padding:'6px 4px' }}>
+          ✏️ Разметка
+        </button>
+      </div>
+
+      {/* Title + mode toggle */}
+      <div className="anim-slide-up" style={{ textAlign:'center', marginBottom:18 }}>
+        <h2 style={{ fontSize:22, fontWeight:900, color:C.text, marginBottom:12 }}>{poem.title}</h2>
+        <div style={{ display:'inline-flex', background:C.light, borderRadius:14, padding:3, gap:3 }}>
+          {[['lines', 'По строкам'], ['select', 'Выбрать']].map(([v, label]) => (
+            <button key={v}
+              onClick={() => { setSelMode(v === 'select'); setSelected(new Set()); stopAll(); }}
+              style={{ padding:'8px 18px', fontSize:14, fontWeight:700, border:'none', borderRadius:11,
+                       cursor:'pointer', transition:'all 0.2s',
+                       background: (!selMode && v === 'lines') || (selMode && v === 'select') ? 'white' : 'transparent',
+                       color: (!selMode && v === 'lines') || (selMode && v === 'select') ? C.text : C.muted,
+                       boxShadow: (!selMode && v === 'lines') || (selMode && v === 'select') ? '0 1px 4px rgba(0,0,0,0.1)' : 'none' }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Lines */}
+      <div style={{ flex:1, overflowY:'auto', display:'flex', flexDirection:'column',
+                    gap:9, paddingBottom:130 }}>
+        {poem.lines.map((line, i) => {
+          const isActive = activeIdx === i;
+          const isSel    = selected.has(i);
+          const color    = segColors[i % segColors.length];
+          return (
+            <div key={i}
+              className={isActive ? 'anim-pop' : ''}
+              onClick={() => selMode ? toggleSelect(i) : (playing === i ? stopAll() : playSingle(i))}
+              style={{ display:'flex', alignItems:'center', gap:12, padding:'15px 16px',
+                       background: isActive ? color + '0.18)' : isSel ? color + '0.1)' : C.card,
+                       border:`2px solid ${isActive ? color+'0.8)' : isSel ? color+'0.5)' : C.border}`,
+                       borderRadius:16, cursor:'pointer', transition:'all 0.18s',
+                       transform: isActive ? 'scale(1.015)' : 'scale(1)' }}>
+              {/* Number badge */}
+              <div style={{ width:32, height:32, borderRadius:9, flexShrink:0,
+                            background: color + (isActive ? '0.3)' : '0.15)'),
+                            display:'flex', alignItems:'center', justifyContent:'center',
+                            fontSize:14, fontWeight:900, color: color + '1)' }}>
+                {i+1}
+              </div>
+              {/* Text */}
+              <span style={{ flex:1, fontSize:16, fontWeight:600, color:C.text,
+                             lineHeight:1.45, textWrap:'pretty' }}>
+                {line}
+              </span>
+              {/* Action icon */}
+              {!selMode && (
+                <div style={{ width:32, height:32, borderRadius:9, flexShrink:0,
+                              background: isActive ? color+'0.2)' : C.light,
+                              display:'flex', alignItems:'center', justifyContent:'center',
+                              fontSize:15 }}>
+                  {isActive ? '⏹' : '▶'}
+                </div>
+              )}
+              {selMode && (
+                <div style={{ width:24, height:24, borderRadius:7, flexShrink:0,
+                              border:`2.5px solid ${isSel ? color+'1)' : C.border}`,
+                              background: isSel ? color+'0.15)' : 'transparent',
+                              display:'flex', alignItems:'center', justifyContent:'center',
+                              fontSize:14, fontWeight:800, color: color+'1)' }}>
+                  {isSel ? '✓' : ''}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Bottom bar */}
+      <div style={{ position:'fixed', bottom:0, left:0, right:0, zIndex:10 }}>
+        <div style={{ maxWidth:600, margin:'0 auto', padding:'12px 20px 32px',
+                      background:`linear-gradient(to bottom, transparent, ${C.bg} 28%)` }}>
+          {selMode && (
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
+              <button
+                onClick={() => setSelected(allSelected ? new Set() : new Set(poem.lines.map((_,i)=>i)))}
+                style={{ fontSize:13, fontWeight:700, color:C.teal, background:'none', border:'none',
+                         cursor:'pointer', padding:'4px 0' }}>
+                {allSelected ? 'Снять всё' : 'Выбрать всё'}
+              </button>
+              {selected.size > 0 && (
+                <button onClick={() => playSequence([...selected].sort((a,b)=>a-b), 'sel')}
+                  style={{ flex:1, padding:'14px', fontSize:15, fontWeight:800,
+                           background:C.teal, color:'white', border:'none', borderRadius:15, cursor:'pointer' }}>
+                  ▶ Играть выбранное ({selected.size})
+                </button>
+              )}
+            </div>
+          )}
+
+          <div style={{ display:'flex', gap:10 }}>
+            <button onClick={() => { setRepeatAll(r => !r); }}
+              style={{ width:52, height:52, borderRadius:14, flexShrink:0,
+                       background: repeatAll ? C.amber : C.light, color: repeatAll ? 'white' : C.muted,
+                       border:'none', cursor:'pointer', fontSize:20, display:'flex',
+                       alignItems:'center', justifyContent:'center' }}
+              title={repeatAll ? 'Повтор включён' : 'Повтор выключен'}>
+              🔁
+            </button>
+            <button onClick={() => playing === 'all' ? stopAll() : playSequence(poem.lines.map((_,i)=>i), 'all')}
+              style={{ flex:1, padding:'15px', fontSize:17, fontWeight:800,
+                       background: playing === 'all' ? '#b03222' : C.coral, color:'white',
+                       border:'none', borderRadius:15, cursor:'pointer', transition:'background 0.2s' }}>
+              {playing === 'all' ? '⏹ Стоп' : '▶ Играть всё'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Shared micro-components ─────────────────────────── */
+function BackBtn({ onClick }) {
+  return (
+    <button onClick={onClick}
+      style={{ alignSelf:'flex-start', background:'none', border:'none', fontSize:15,
+               color:C.muted, fontWeight:700, cursor:'pointer', padding:'4px 0', marginBottom:4 }}>
+      ← Назад
+    </button>
+  );
+}
+function StepHeader({ step, total, label }) {
+  return (
+    <div className="anim-slide-up" style={{ marginBottom:8 }}>
+      <div style={{ display:'flex', gap:6, marginBottom:10 }}>
+        {Array.from({length:total}, (_,i) => (
+          <div key={i} style={{ flex:1, height:4, borderRadius:4,
+                                background: i < step ? C.coral : C.border,
+                                transition:'background 0.3s' }} />
+        ))}
+      </div>
+      <h2 style={{ fontSize:24, fontWeight:900, color:C.text }}>{label}</h2>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   ROOT APP
+═══════════════════════════════════════════════════════ */
+function App() {
+  const [screen,      setScreen]      = useState('input');
+  const [poem,        setPoem]        = useState(null);
+  const [audioBuffer, setAudioBuffer] = useState(null);
+  const [segments,    setSegments]    = useState(null);
+
+  // Restore last session
+  useEffect(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('pt-session') || 'null');
+      if (s?.poem) {
+        setPoem(s.poem);
+        if (s.segments) setSegments(s.segments);
+        if (s.screen && s.screen !== 'input') setScreen(s.screen);
+      }
+    } catch {}
+  }, []);
+
+  // Persist session
+  useEffect(() => {
+    if (poem) localStorage.setItem('pt-session', JSON.stringify({ poem, screen, segments }));
+  }, [poem, screen, segments]);
+
+  // Load audio when we need it
+  useEffect(() => {
+    if (!poem || screen === 'input' || screen === 'record') return;
+    if (audioBuffer) return;
+    DB.load(poem.id).then(async blob => {
+      if (!blob) return;
+      const ac = new AudioContext();
+      const ab = await blob.arrayBuffer();
+      const buf = await ac.decodeAudioData(ab);
+      setAudioBuffer(buf);
+    }).catch(console.error);
+  }, [poem, screen]);
+
+  const go = (scr) => setScreen(scr);
+
+  if (screen === 'input') return (
+    <InputScreen onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); go('record'); }} />
+  );
+
+  if (screen === 'record') return (
+    <RecordScreen poem={poem}
+      onNext={blob => {
+        // Decode audio eagerly
+        blob.arrayBuffer().then(ab => new AudioContext().decodeAudioData(ab)).then(setAudioBuffer).catch(()=>{});
+        go('segment');
+      }}
+      onBack={() => go('input')} />
+  );
+
+  if (screen === 'segment') return (
+    <SegmentScreen poem={poem} audioBuffer={audioBuffer}
+      onNext={segs => { setSegments(segs); go('practice'); }}
+      onBack={() => go('record')} />
+  );
+
+  if (screen === 'practice') return (
+    <PracticeScreen poem={poem} audioBuffer={audioBuffer} segments={segments}
+      onBack={() => go('segment')}
+      onReSegment={() => go('segment')} />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
