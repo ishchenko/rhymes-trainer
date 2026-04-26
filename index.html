@@ -10,14 +10,14 @@
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; }
+    html, body { min-height: 100%; }
     body {
       font-family: 'Nunito', sans-serif;
       background: #F5F0E8;
       color: #2A2520;
       -webkit-font-smoothing: antialiased;
     }
-    #root { height: 100%; }
+    #root { min-height: 100%; }
 
     input, textarea, button {
       font-family: 'Nunito', sans-serif;
@@ -475,11 +475,14 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   const [playing,   setPlaying]   = useState(null);
   const [loaded,    setLoaded]    = useState(false);
   const canvasRef   = useRef(null);
-  const audioCtxRef = useRef(null);
-  const srcRef      = useRef(null);
-  const dragging    = useRef(null); // 'start' | 'end' | number — не state, ref чтобы избежать stale closure
-  const stateRef    = useRef({});
-  stateRef.current  = { dividers, trimStart, trimEnd };
+  const audioCtxRef  = useRef(null);
+  const srcRef       = useRef(null);
+  const dragging     = useRef(null); // 'start' | 'end' | number
+  const dragRectRef  = useRef(null); // canvas BoundingClientRect, кэшируется при начале drag
+  const dragRafRef   = useRef(null); // pending rAF id
+  const pendingX     = useRef(0);
+  const stateRef     = useRef({});
+  stateRef.current   = { dividers, trimStart, trimEnd };
 
   const segColors = useMemo(() => [
     'rgba(212,84,60,','rgba(74,148,144,','rgba(201,138,48,',
@@ -522,14 +525,13 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   useEffect(() => { if (audioBuffer) { setLoaded(true); drawWaveform(); } }, [audioBuffer]);
   useEffect(() => { drawWaveform(); }, [dividers, trimStart, trimEnd, playing, drawWaveform]);
 
-  // Drag — document-уровень, stateRef для актуальных значений
+  // Drag — Pointer Events, document-уровень, stateRef для актуальных значений
   useEffect(() => {
     const getX = (clientX) => {
-      const c = canvasRef.current; if (!c) return 0;
-      const r = c.getBoundingClientRect();
+      const r = dragRectRef.current; if (!r) return 0;
       return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
     };
-    const move = (clientX) => {
+    const applyMove = (clientX) => {
       const tgt = dragging.current; if (tgt === null) return;
       const x = getX(clientX);
       const { dividers:divs, trimStart:ts, trimEnd:te } = stateRef.current;
@@ -546,22 +548,33 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
         setDividers(nd);
       }
     };
-    const onUp = () => { dragging.current = null; };
-    const onMouseMove = e => move(e.clientX);
-    const onTouchMove = e => { e.preventDefault(); move(e.touches[0].clientX); };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('touchmove', onTouchMove, { passive:false });
-    document.addEventListener('touchend', onUp);
+    const onUp = () => { dragging.current = null; dragRectRef.current = null; };
+    const onMove = e => {
+      if (dragging.current === null) return;
+      pendingX.current = e.clientX;
+      if (!dragRafRef.current) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null;
+          applyMove(pendingX.current);
+        });
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
     return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onUp);
-      document.removeEventListener('touchmove', onTouchMove);
-      document.removeEventListener('touchend', onUp);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null; }
     };
   }, []);
 
-  const startDrag = (e, tgt) => { e.preventDefault(); dragging.current = tgt; };
+  const startDrag = (e, tgt) => {
+    e.preventDefault();
+    dragging.current = tgt;
+    dragRectRef.current = canvasRef.current?.getBoundingClientRect() ?? null;
+  };
 
   const getAudioCtx = () => {
     if (!audioCtxRef.current || audioCtxRef.current.state==='closed') audioCtxRef.current = new AudioContext();
@@ -587,7 +600,7 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
 
   // DOM-ручка (делитель или обрезка)
   const Handle = ({ pos, color, label, dragKey, size=22 }) => (
-    <div onMouseDown={e=>startDrag(e,dragKey)} onTouchStart={e=>startDrag(e,dragKey)}
+    <div onPointerDown={e=>startDrag(e,dragKey)}
       style={{ position:'absolute', top:0, bottom:0, left:`${pos*100}%`,
                transform:'translateX(-50%)', width:32, cursor:'ew-resize',
                touchAction:'none', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2 }}>
