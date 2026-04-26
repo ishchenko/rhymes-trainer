@@ -1007,41 +1007,55 @@ function App() {
 
   const go = (scr) => setScreen(scr);
 
-  if (screen === 'input') return (
+  let content;
+  if (screen === 'input') content = (
     <InputScreen
       onNext={p => { setPoem(p); setAudioBuffer(null); setSegments(null); setDividers(null); setTrimStart(null); setTrimEnd(null); go('record'); }}
       onResume={s => {
         setPoem(s.poem);
-        if (s.segments)        setSegments(s.segments);
-        if (s.dividers)        setDividers(s.dividers);
+        if (s.segments)          setSegments(s.segments);
+        if (s.dividers)          setDividers(s.dividers);
         if (s.trimStart != null) setTrimStart(s.trimStart);
         if (s.trimEnd   != null) setTrimEnd(s.trimEnd);
         go(s.segments ? 'practice' : s.screen && s.screen !== 'input' ? s.screen : 'record');
       }}
     />
   );
-
-  if (screen === 'record') return (
+  else if (screen === 'record') content = (
     <RecordScreen poem={poem}
       onNext={blob => {
-        // Decode audio eagerly
         blob.arrayBuffer().then(ab => new AudioContext().decodeAudioData(ab)).then(setAudioBuffer).catch(()=>{});
         go('segment');
       }}
       onBack={() => go('input')} />
   );
-
-  if (screen === 'segment') return (
+  else if (screen === 'segment') content = (
     <SegmentScreen poem={poem} audioBuffer={audioBuffer}
       savedDividers={dividers} savedTrimStart={trimStart} savedTrimEnd={trimEnd}
       onNext={(segs, divs, ts, te) => { setSegments(segs); setDividers(divs); setTrimStart(ts); setTrimEnd(te); go('practice'); }}
       onBack={() => go('record')} />
   );
-
-  if (screen === 'practice') return (
+  else if (screen === 'practice') content = (
     <PracticeScreen poem={poem} audioBuffer={audioBuffer} segments={segments}
       onBack={() => go('segment')}
       onReSegment={() => go('segment')} />
+  );
+
+  const deployedAt = (() => {
+    const d = new Date(document.lastModified);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getDate())}.${pad(d.getMonth()+1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  })();
+
+  return (
+    <>
+      {content}
+      <div style={{ position:'fixed', bottom:6, right:8, fontSize:10,
+                    color:C.muted, opacity:0.45, pointerEvents:'none',
+                    fontVariantNumeric:'tabular-nums', userSelect:'none' }}>
+        {deployedAt}
+      </div>
+    </>
   );
 }
 
