@@ -467,6 +467,34 @@ function RecordScreen({ poem, onNext, onBack }) {
 /* ═══════════════════════════════════════════════════════
    SCREEN 3 — SEGMENT
 ═══════════════════════════════════════════════════════ */
+
+// Определяем СНАРУЖИ SegmentScreen — стабильный тип компонента, React не делает unmount/remount при ре-рендере
+function DragHandle({ pos, color, label, dragKey, size, dragCbRef }) {
+  const elRef = useRef(null);
+  useEffect(() => {
+    const el = elRef.current; if (!el) return;
+    const onTouch = (e) => { e.preventDefault(); dragCbRef.current?.(e.touches[0].clientX, dragKey); };
+    const onMouse = (e) => { dragCbRef.current?.(e.clientX, dragKey); };
+    el.addEventListener('touchstart', onTouch, { passive: false });
+    el.addEventListener('mousedown', onMouse);
+    return () => { el.removeEventListener('touchstart', onTouch); el.removeEventListener('mousedown', onMouse); };
+  }, []); // dragCbRef — стабильный ref-объект; dragKey не меняется для данного хендла
+  return (
+    <div ref={elRef}
+      style={{ position:'absolute', top:0, bottom:0, left:`${pos*100}%`,
+               transform:'translateX(-50%)', width:44, cursor:'ew-resize',
+               touchAction:'none', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2 }}>
+      <div style={{ position:'absolute', top:0, bottom:0, width:2, background:color, opacity:0.7 }} />
+      <div style={{ width:size, height:size, borderRadius:'50%', background:color,
+                    border:'2.5px solid white', boxShadow:'0 1px 4px rgba(0,0,0,0.25)',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    fontSize:11, color:'white', fontWeight:800, position:'relative' }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
 function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, savedTrimEnd, onNext, onBack }) {
   const n = poem.lines.length;
   const [dividers,  setDividers]  = useState(() => savedDividers  || Array.from({length:n-1},(_,i)=>(i+1)/n));
@@ -475,15 +503,23 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   const [playing,   setPlaying]   = useState(null);
   const [loaded,    setLoaded]    = useState(false);
   const canvasRef   = useRef(null);
-  const audioCtxRef  = useRef(null);
-  const srcRef       = useRef(null);
-  const dragging     = useRef(null); // 'start' | 'end' | number(index)
-  const dragRectRef  = useRef(null); // canvas BoundingClientRect, кэшируется при начале drag
-  const dragRafRef   = useRef(null); // pending rAF id
-  const pendingX     = useRef(0);
-  const containerRef = useRef(null); // waveform container, для нативного touchstart
-  const stateRef     = useRef({});
-  stateRef.current   = { dividers, trimStart, trimEnd };
+  const audioCtxRef = useRef(null);
+  const srcRef      = useRef(null);
+  const dragging    = useRef(null); // 'start' | 'end' | number(index)
+  const dragRectRef = useRef(null); // canvas BoundingClientRect, кэшируется при начале drag
+  const dragRafRef  = useRef(null);
+  const pendingX    = useRef(0);
+  const dragCbRef   = useRef(null); // стабильная ссылка для DragHandle.useEffect
+  const stateRef    = useRef({});
+  stateRef.current  = { dividers, trimStart, trimEnd };
+
+  // Обновляем каждый рендер — DragHandle читает .current при событии, не в замыкании
+  dragCbRef.current = (clientX, tgt) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    dragging.current = tgt;
+    dragRectRef.current = rect;
+  };
 
   const segColors = useMemo(() => [
     'rgba(212,84,60,','rgba(74,148,144,','rgba(201,138,48,',
@@ -526,7 +562,7 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   useEffect(() => { if (audioBuffer) { setLoaded(true); drawWaveform(); } }, [audioBuffer]);
   useEffect(() => { drawWaveform(); }, [dividers, trimStart, trimEnd, playing, drawWaveform]);
 
-  // Drag — нативные listeners на containerRef + document, без React synthetic events
+  // Drag — document-уровень (touchstart на каждом DragHandle через нативный listener)
   useEffect(() => {
     const applyMove = (clientX) => {
       const tgt = dragging.current; if (tgt === null) return;
@@ -549,58 +585,22 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
     const scheduleMove = (clientX) => {
       pendingX.current = clientX;
       if (!dragRafRef.current) {
-        dragRafRef.current = requestAnimationFrame(() => {
-          dragRafRef.current = null;
-          applyMove(pendingX.current);
-        });
+        dragRafRef.current = requestAnimationFrame(() => { dragRafRef.current = null; applyMove(pendingX.current); });
       }
     };
-
-    // Определяем ближайшую ручку и начинаем drag
-    const onDown = (e) => {
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const x = (clientX - rect.left) / rect.width;
-      const { dividers:divs, trimStart:ts, trimEnd:te } = stateRef.current;
-      const candidates = [
-        { key:'start', pos:ts },
-        ...divs.map((d,i) => ({ key:i, pos:d })),
-        { key:'end', pos:te },
-      ];
-      let closest = null, minDist = Infinity;
-      for (const { key, pos } of candidates) {
-        const d = Math.abs(pos - x); if (d < minDist) { minDist = d; closest = key; }
-      }
-      if (minDist > 56 / rect.width) return; // за пределами зоны захвата
-      e.preventDefault();
-      dragging.current = closest;
-      dragRectRef.current = rect;
-    };
-
     const onUp = () => { dragging.current = null; };
-    const onMouseMove = e => { if (dragging.current !== null) scheduleMove(e.clientX); };
-    const onTouchMove = e => {
-      if (dragging.current === null) return;
-      e.preventDefault();
-      scheduleMove(e.touches[0].clientX);
-    };
-
-    const el = containerRef.current;
-    el?.addEventListener('mousedown', onDown);
-    el?.addEventListener('touchstart', onDown, { passive: false });
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('touchmove', onTouchMove, { passive: false });
-    document.addEventListener('touchend', onUp);
+    const onMouseMove  = e => { if (dragging.current !== null) scheduleMove(e.clientX); };
+    const onTouchMove  = e => { if (dragging.current === null) return; e.preventDefault(); scheduleMove(e.touches[0].clientX); };
+    document.addEventListener('mousemove',   onMouseMove);
+    document.addEventListener('mouseup',     onUp);
+    document.addEventListener('touchmove',   onTouchMove,  { passive: false });
+    document.addEventListener('touchend',    onUp);
     document.addEventListener('touchcancel', onUp);
     return () => {
-      el?.removeEventListener('mousedown', onDown);
-      el?.removeEventListener('touchstart', onDown);
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onUp);
-      document.removeEventListener('touchmove', onTouchMove);
-      document.removeEventListener('touchend', onUp);
+      document.removeEventListener('mousemove',   onMouseMove);
+      document.removeEventListener('mouseup',     onUp);
+      document.removeEventListener('touchmove',   onTouchMove);
+      document.removeEventListener('touchend',    onUp);
       document.removeEventListener('touchcancel', onUp);
       if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null; }
     };
@@ -628,21 +628,6 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
     onNext(segs, dividers, trimStart, trimEnd);
   };
 
-  // DOM-ручка — только визуал, drag обрабатывает containerRef
-  const Handle = ({ pos, color, label, size=22 }) => (
-    <div style={{ position:'absolute', top:0, bottom:0, left:`${pos*100}%`,
-                  transform:'translateX(-50%)', width:2, pointerEvents:'none',
-                  display:'flex', alignItems:'center', justifyContent:'center', zIndex:2 }}>
-      <div style={{ position:'absolute', top:0, bottom:0, width:2, background:color, opacity:0.7 }} />
-      <div style={{ width:size, height:size, borderRadius:'50%', background:color,
-                    border:'2.5px solid white', boxShadow:'0 1px 4px rgba(0,0,0,0.25)',
-                    display:'flex', alignItems:'center', justifyContent:'center',
-                    fontSize:11, color:'white', fontWeight:800, position:'relative' }}>
-        {label}
-      </div>
-    </div>
-  );
-
   const col2 = { gridColumn:2, padding:'0 20px' };
 
   return (
@@ -658,21 +643,21 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
       </div>
 
       {/* Волна на всю ширину, ручки — DOM поверх канваса */}
-      <div ref={containerRef} style={{ gridColumn:'1 / -1', position:'relative', touchAction:'none',
+      <div style={{ gridColumn:'1 / -1', position:'relative',
                     background:C.card, borderTop:`2px solid ${C.border}`, borderBottom:`2px solid ${C.border}` }}>
         {!loaded && (
           <div style={{ height:180, display:'flex', alignItems:'center', justifyContent:'center',
                         color:C.muted, fontSize:14, fontWeight:600 }}>Загрузка аудио…</div>
         )}
         <canvas ref={canvasRef} width={1200} height={180}
-          style={{ display:'block', width:'100%', height:180, opacity:loaded?1:0 }} />
+          style={{ display:'block', width:'100%', height:180, touchAction:'none', opacity:loaded?1:0 }} />
 
         {loaded && <>
-          <Handle pos={trimStart} color={C.amber} label="◁" size={24} />
+          <DragHandle pos={trimStart} color={C.amber} label="◁" dragKey="start" size={24} dragCbRef={dragCbRef} />
           {dividers.map((d,i) => (
-            <Handle key={i} pos={d} color={C.text} label="" size={20} />
+            <DragHandle key={i} pos={d} color={C.text} label="" dragKey={i} size={20} dragCbRef={dragCbRef} />
           ))}
-          <Handle pos={trimEnd} color={C.amber} label="▷" size={24} />
+          <DragHandle pos={trimEnd} color={C.amber} label="▷" dragKey="end" size={24} dragCbRef={dragCbRef} />
         </>}
       </div>
 
