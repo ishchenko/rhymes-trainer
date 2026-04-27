@@ -468,19 +468,14 @@ function RecordScreen({ poem, onNext, onBack }) {
    SCREEN 3 — SEGMENT
 ═══════════════════════════════════════════════════════ */
 
-// Определяем СНАРУЖИ SegmentScreen — стабильный тип компонента, React не делает unmount/remount при ре-рендере
-function DragHandle({ pos, color, label, dragKey, size, dragCbRef }) {
-  const elRef = useRef(null);
-  useEffect(() => {
-    const el = elRef.current; if (!el) return;
-    const onTouch = (e) => { e.preventDefault(); dragCbRef.current?.(e.touches[0].clientX, dragKey); };
-    const onMouse = (e) => { dragCbRef.current?.(e.clientX, dragKey); };
-    el.addEventListener('touchstart', onTouch, { passive: false });
-    el.addEventListener('mousedown', onMouse);
-    return () => { el.removeEventListener('touchstart', onTouch); el.removeEventListener('mousedown', onMouse); };
-  }, []); // dragCbRef — стабильный ref-объект; dragKey не меняется для данного хендла
+// Снаружи SegmentScreen — стабильный тип, React не делает unmount/remount при ре-рендере.
+// React synthetic onTouchStart: проверено работает; нативные listeners с useEffect ненадёжны
+// из-за асинхронности useEffect в concurrent mode.
+function DragHandle({ pos, color, label, dragKey, size, onStart }) {
   return (
-    <div ref={elRef}
+    <div
+      onMouseDown={e => onStart(e, dragKey)}
+      onTouchStart={e => onStart(e, dragKey)}
       style={{ position:'absolute', top:0, bottom:0, left:`${pos*100}%`,
                transform:'translateX(-50%)', width:44, cursor:'ew-resize',
                touchAction:'none', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2 }}>
@@ -509,17 +504,18 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   const dragRectRef = useRef(null); // canvas BoundingClientRect, кэшируется при начале drag
   const dragRafRef  = useRef(null);
   const pendingX    = useRef(0);
-  const dragCbRef   = useRef(null); // стабильная ссылка для DragHandle.useEffect
   const stateRef    = useRef({});
   stateRef.current  = { dividers, trimStart, trimEnd };
 
-  // Обновляем каждый рендер — DragHandle читает .current при событии, не в замыкании
-  dragCbRef.current = (clientX, tgt) => {
+  // useCallback с [] — стабильная ссылка, DragHandle не перерендеривается из-за onStart
+  const startDrag = useCallback((e, tgt) => {
+    e.preventDefault();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
     dragging.current = tgt;
     dragRectRef.current = rect;
-  };
+  }, []);
 
   const segColors = useMemo(() => [
     'rgba(212,84,60,','rgba(74,148,144,','rgba(201,138,48,',
@@ -653,11 +649,11 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
           style={{ display:'block', width:'100%', height:180, touchAction:'none', opacity:loaded?1:0 }} />
 
         {loaded && <>
-          <DragHandle pos={trimStart} color={C.amber} label="◁" dragKey="start" size={24} dragCbRef={dragCbRef} />
+          <DragHandle pos={trimStart} color={C.amber} label="◁" dragKey="start" size={24} onStart={startDrag} />
           {dividers.map((d,i) => (
-            <DragHandle key={i} pos={d} color={C.text} label="" dragKey={i} size={20} dragCbRef={dragCbRef} />
+            <DragHandle key={i} pos={d} color={C.text} label="" dragKey={i} size={20} onStart={startDrag} />
           ))}
-          <DragHandle pos={trimEnd} color={C.amber} label="▷" dragKey="end" size={24} dragCbRef={dragCbRef} />
+          <DragHandle pos={trimEnd} color={C.amber} label="▷" dragKey="end" size={24} onStart={startDrag} />
         </>}
       </div>
 
