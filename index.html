@@ -468,9 +468,18 @@ function RecordScreen({ poem, onNext, onBack }) {
    SCREEN 3 — SEGMENT
 ═══════════════════════════════════════════════════════ */
 
+// ─── DEBUG LOG ──────────────────────────────────────────
+const _logs = [];
+function dbg(msg) {
+  const t = new Date().toISOString().slice(11,23);
+  _logs.unshift(`${t} ${msg}`);
+  if (_logs.length > 30) _logs.pop();
+  const el = document.getElementById('__dbg');
+  if (el) el.textContent = _logs.join('\n');
+}
+// ────────────────────────────────────────────────────────
+
 // Снаружи SegmentScreen — стабильный тип, React не делает unmount/remount при ре-рендере.
-// React synthetic onTouchStart: проверено работает; нативные listeners с useEffect ненадёжны
-// из-за асинхронности useEffect в concurrent mode.
 function DragHandle({ pos, color, label, dragKey, size, onStart }) {
   return (
     <div
@@ -507,11 +516,12 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   const stateRef    = useRef({});
   stateRef.current  = { dividers, trimStart, trimEnd };
 
-  // useCallback с [] — стабильная ссылка, DragHandle не перерендеривается из-за onStart
   const startDrag = useCallback((e, tgt) => {
+    dbg(`startDrag tgt=${tgt} type=${e.type} touches=${e.touches?.length}`);
     e.preventDefault();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const rect = canvasRef.current?.getBoundingClientRect();
+    dbg(`  rect=${rect ? `l=${rect.left.toFixed(0)} w=${rect.width.toFixed(0)}` : 'NULL'} clientX=${clientX.toFixed(0)}`);
     if (!rect) return;
     dragging.current = tgt;
     dragRectRef.current = rect;
@@ -584,9 +594,14 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
         dragRafRef.current = requestAnimationFrame(() => { dragRafRef.current = null; applyMove(pendingX.current); });
       }
     };
-    const onUp = () => { dragging.current = null; };
+    const onUp = () => { dbg(`onUp drag=${dragging.current}`); dragging.current = null; };
     const onMouseMove  = e => { if (dragging.current !== null) scheduleMove(e.clientX); };
-    const onTouchMove  = e => { if (dragging.current === null) return; e.preventDefault(); scheduleMove(e.touches[0].clientX); };
+    const onTouchMove  = e => {
+      if (dragging.current === null) { dbg(`touchmove IGNORED drag=null`); return; }
+      e.preventDefault();
+      dbg(`touchmove drag=${dragging.current} x=${e.touches[0].clientX.toFixed(0)}`);
+      scheduleMove(e.touches[0].clientX);
+    };
     document.addEventListener('mousemove',   onMouseMove);
     document.addEventListener('mouseup',     onUp);
     document.addEventListener('touchmove',   onTouchMove,  { passive: false });
@@ -1046,6 +1061,11 @@ function App() {
                     fontVariantNumeric:'tabular-nums', userSelect:'none' }}>
         {deployedAt}
       </div>
+      <pre id="__dbg" style={{ position:'fixed', top:0, left:0, right:0, maxHeight:220,
+                               overflowY:'auto', background:'rgba(0,0,0,0.82)', color:'#0f0',
+                               fontSize:10, lineHeight:1.3, padding:'4px 6px', margin:0,
+                               zIndex:9999, pointerEvents:'none', whiteSpace:'pre-wrap',
+                               fontFamily:'monospace' }} />
     </>
   );
 }
