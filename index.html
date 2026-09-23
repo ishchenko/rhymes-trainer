@@ -488,6 +488,8 @@ function DragHandle({ pos, color, label, dragKey, size, onStart }) {
   );
 }
 
+const MIN_SEG_SEC = 0.1;
+
 function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, savedTrimEnd, onNext, onBack }) {
   const n = poem.lines.length;
   const [dividers,  setDividers]  = useState(() => savedDividers  || Array.from({length:n-1},(_,i)=>(i+1)/n));
@@ -503,7 +505,7 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
   const dragRafRef  = useRef(null);
   const pendingX    = useRef(0);
   const stateRef    = useRef({});
-  stateRef.current  = { dividers, trimStart, trimEnd };
+  stateRef.current  = { dividers, trimStart, trimEnd, duration: audioBuffer?.duration };
 
   const startDrag = useCallback((e, tgt) => {
     e.preventDefault();
@@ -561,16 +563,17 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
       const tgt = dragging.current; if (tgt === null) return;
       const r = dragRectRef.current; if (!r) return;
       const x = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-      const { dividers:divs, trimStart:ts, trimEnd:te } = stateRef.current;
+      const { dividers:divs, trimStart:ts, trimEnd:te, duration } = stateRef.current;
+      const gap = duration ? MIN_SEG_SEC / duration : 0.005; // минимальная длина куска, в долях записи
       if (tgt === 'start') {
-        const max = divs.length ? divs[0]-0.04 : te-0.08;
+        const max = divs.length ? divs[0]-gap : te-gap;
         setTrimStart(Math.max(0, Math.min(max, x)));
       } else if (tgt === 'end') {
-        const min = divs.length ? divs[divs.length-1]+0.04 : ts+0.08;
+        const min = divs.length ? divs[divs.length-1]+gap : ts+gap;
         setTrimEnd(Math.max(min, Math.min(1, x)));
       } else {
-        const lo = tgt > 0 ? divs[tgt-1]+0.04 : ts+0.04;
-        const hi = tgt < divs.length-1 ? divs[tgt+1]-0.04 : te-0.04;
+        const lo = tgt > 0 ? divs[tgt-1]+gap : ts+gap;
+        const hi = tgt < divs.length-1 ? divs[tgt+1]-gap : te-gap;
         const nd = [...divs]; nd[tgt] = Math.max(lo, Math.min(hi, x));
         setDividers(nd);
       }
