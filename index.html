@@ -107,6 +107,60 @@ const DB = (() => {
 /* ─── Helpers ──────────────────────────────────────────── */
 const fmtTime = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
 
+// Load OCR only when a photo is selected; recognition runs locally in a worker.
+let ocrLibraryPromise = null;
+function loadOcrLibrary() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (!ocrLibraryPromise) {
+    ocrLibraryPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const fail = () => {
+        clearTimeout(timer);
+        script.remove();
+        ocrLibraryPromise = null;
+        reject(new Error('Не удалось загрузить распознавание. Проверь интернет и попробуй ещё раз.'));
+      };
+      const timer = setTimeout(fail, 30000);
+      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js';
+      script.integrity = 'sha384-r1ru3tcf6FhnCFR4B7pIFG+BhFF9LlFtz/P1y4pblWn3AGs9y3lBx5SKLNf4+rED';
+      script.crossOrigin = 'anonymous';
+      script.onload = () => {
+        if (!window.Tesseract) return fail();
+        clearTimeout(timer);
+        resolve(window.Tesseract);
+      };
+      script.onerror = fail;
+      document.head.appendChild(script);
+    });
+  }
+  return ocrLibraryPromise;
+}
+
+// Limit camera image size to avoid excessive OCR memory use on phones.
+async function prepareOcrPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('Не удалось открыть фото. Попробуй снимок в формате JPEG или PNG.'));
+      image.src = url;
+    });
+    const scale = Math.min(1, 2400 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Браузер не смог обработать фото. Попробуй другой браузер.');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 /* ═══════════════════════════════════════════════════════
    SCREEN 1 — INPUT
 ═══════════════════════════════════════════════════════ */
@@ -116,6 +170,100 @@ function InputScreen({ onNext, onResume }) {
   const [saved, setSaved] = useState([]);
   const [sessionId, setSessionId] = useState(null);
   const [loadedSession, setLoadedSession] = useState(null); // сессия загруженного стиха
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState('');
+  const [ocrError, setOcrError] = useState('');
+  const cameraRef = useRef(null);
+  const photoRef = useRef(null);
+  const textRef = useRef(null);
+  const ocrTaskRef = useRef(null);
+
+  const stopOcr = () => {
+    const task = ocrTaskRef.current;
+    ocrTaskRef.current = null;
+    if (task) {
+      clearTimeout(task.timer);
+      task.worker?.terminate().catch(() => {});
+    }
+  };
+
+  const cancelOcr = () => {
+    stopOcr();
+    setOcrBusy(false);
+    setOcrStatus('');
+    setOcrError('');
+  };
+
+  useEffect(() => () => stopOcr(), []);
+
+  const importPhoto = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // Allow selecting the same photo again after an error.
+    if (!file || ocrTaskRef.current) return;
+    setOcrStatus('');
+    setOcrError('');
+    if (file.type && !file.type.startsWith('image/')) {
+      setOcrError('Выбери фото с текстом стихотворения.');
+      return;
+    }
+    const task = { worker: null, timer: null };
+    ocrTaskRef.current = task;
+    const active = () => ocrTaskRef.current === task;
+    const fail = (message) => {
+      if (!active()) return;
+      stopOcr();
+      setOcrBusy(false);
+      setOcrStatus('');
+      setOcrError(message);
+    };
+    task.timer = setTimeout(() => fail('Распознавание заняло слишком много времени. Проверь интернет и попробуй ещё раз.'), 120000);
+    setOcrBusy(true);
+    setOcrStatus('Подготавливаем распознавание…');
+    try {
+      const photo = await prepareOcrPhoto(file);
+      if (!active()) return;
+      const Tesseract = await loadOcrLibrary();
+      if (!active()) return;
+      const worker = await Tesseract.createWorker(['rus', 'eng'], 1, {
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0',
+        logger: ({ status, progress }) => {
+          if (!active()) return;
+          setOcrStatus(status === 'recognizing text'
+            ? `Распознаём текст… ${Math.round((progress || 0) * 100)}%`
+            : 'Загружаем модуль и языки распознавания…');
+        },
+        errorHandler: () => fail('Не удалось распознать фото. Проверь интернет и попробуй ещё раз.'),
+      });
+      if (!active()) {
+        await worker.terminate();
+        return;
+      }
+      task.worker = worker;
+      const { data } = await worker.recognize(photo);
+      if (!active()) return;
+      const recognized = data.text.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).join('\n').trim();
+      if (!recognized) {
+        setOcrError('Текст не найден. Сфотографируй стих поближе, при хорошем освещении.');
+        setOcrStatus('');
+        return;
+      }
+      setText(current => current.trim() ? `${current.trimEnd()}\n\n${recognized}` : recognized);
+      setLoadedSession(null);
+      setOcrStatus('Текст добавлен. Проверь распознавание и переносы строк.');
+      textRef.current?.focus();
+    } catch (error) {
+      if (active()) {
+        setOcrStatus('');
+        setOcrError(error.message || 'Не удалось распознать фото. Попробуй ещё раз.');
+      }
+    } finally {
+      if (active()) {
+        stopOcr();
+        setOcrBusy(false);
+      }
+    }
+  };
 
   useEffect(() => {
     try {
@@ -139,6 +287,7 @@ function InputScreen({ onNext, onResume }) {
   };
 
   const open = (p) => {
+    cancelOcr();
     setTitle(p.title); setText(p.lines.join('\n'));
     try {
       const s = JSON.parse(localStorage.getItem('pt-session') || 'null');
@@ -163,7 +312,7 @@ function InputScreen({ onNext, onResume }) {
       {/* Form */}
       <div className="anim-slide-up" style={{ width:'100%', display:'flex', flexDirection:'column', gap:14,
                         animationDelay:'0.06s' }}>
-        <button onClick={() => { setTitle(''); setText(''); setLoadedSession(null); }}
+        <button onClick={() => { cancelOcr(); setTitle(''); setText(''); setLoadedSession(null); }}
           style={{ alignSelf:'flex-start', background:'none', border:'none', fontSize:13,
                    color:C.muted, fontWeight:700, cursor:'pointer', padding:'2px 0',
                    textDecoration:'underline', textUnderlineOffset:3,
@@ -183,7 +332,44 @@ function InputScreen({ onNext, onResume }) {
           onFocus={e => e.target.style.borderColor = C.coral}
           onBlur={e => e.target.style.borderColor = C.border}
         />
+        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+          <input ref={cameraRef} type="file" accept="image/*" capture="environment"
+            aria-label="Сфотографировать стих" hidden onChange={importPhoto} />
+          <input ref={photoRef} type="file" accept="image/*"
+            aria-label="Выбрать фото стиха" hidden onChange={importPhoto} />
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            <button onClick={() => cameraRef.current?.click()} disabled={ocrBusy}
+              style={{ flex:'1 1 180px', padding:'12px 14px', fontSize:14, fontWeight:800,
+                       border:`2px solid ${C.teal}`, borderRadius:14, background:C.card,
+                       color:C.teal, cursor:ocrBusy ? 'default' : 'pointer', opacity:ocrBusy ? 0.5 : 1 }}>
+              📷 Сфотографировать стих
+            </button>
+            <button onClick={() => photoRef.current?.click()} disabled={ocrBusy}
+              style={{ flex:'1 1 140px', padding:'12px 14px', fontSize:14, fontWeight:800,
+                       border:`2px solid ${C.border}`, borderRadius:14, background:C.card,
+                       color:C.text, cursor:ocrBusy ? 'default' : 'pointer', opacity:ocrBusy ? 0.5 : 1 }}>
+              Выбрать фото
+            </button>
+          </div>
+          <p style={{ fontSize:12, lineHeight:1.5, color:C.muted }}>
+            Сфотографируй печатный текст крупно и ровно. Строки добавятся в поле ниже.
+            {' '}Фото обрабатывается на устройстве. Для загрузки распознавания нужен интернет.
+          </p>
+          <div role="status" aria-live="polite" aria-atomic="true"
+            style={{ fontSize:13, fontWeight:700, color:C.teal }}>
+            {ocrStatus}
+          </div>
+          {ocrBusy && <button onClick={cancelOcr}
+            style={{ alignSelf:'flex-start', background:'none', border:'none', color:C.muted,
+                     fontSize:13, fontWeight:700, textDecoration:'underline', cursor:'pointer', padding:'4px 0' }}>
+            Отменить распознавание
+          </button>}
+          {ocrError && <p role="alert" style={{ fontSize:13, fontWeight:700, color:C.coral }}>{ocrError}</p>}
+        </div>
         <textarea
+          ref={textRef}
+          aria-label="Текст стихотворения"
+          aria-busy={ocrBusy}
           value={text}
           onChange={e => setText(e.target.value)}
           placeholder={"Введи строки стиха,\nкаждая строка — с новой строки..."}
