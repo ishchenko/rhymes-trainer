@@ -107,6 +107,58 @@ const DB = (() => {
 /* ─── Helpers ──────────────────────────────────────────── */
 const fmtTime = s => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
 
+// Splice in sample frames so neighbours and the trimmed edges keep their audio.
+function replaceLineAudio(ac, original, recording, segments, index) {
+  const rate = original.sampleRate;
+  const start = Math.round(segments[index].start * rate);
+  const end = Math.round(segments[index].end * rate);
+  const delta = recording.length - (end - start);
+  const buffer = ac.createBuffer(Math.max(original.numberOfChannels, recording.numberOfChannels),
+    original.length + delta, rate);
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const before = original.getChannelData(Math.min(ch, original.numberOfChannels - 1));
+    const replacement = recording.getChannelData(Math.min(ch, recording.numberOfChannels - 1));
+    const output = buffer.getChannelData(ch);
+    output.set(before.subarray(0, start));
+    output.set(replacement, start);
+    output.set(before.subarray(end), start + recording.length);
+  }
+  const updated = segments.map((seg, i) => ({
+    start: (Math.round(seg.start * rate) + (i > index ? delta : 0)) / rate,
+    end: (Math.round(seg.end * rate) + (i >= index ? delta : 0)) / rate,
+  }));
+  return {
+    buffer, segments: updated,
+    dividers: updated.slice(0, -1).map(seg => seg.end / buffer.duration),
+    trimStart: updated[0].start / buffer.duration,
+    trimEnd: updated[updated.length - 1].end / buffer.duration,
+  };
+}
+
+// WAV lets the spliced recording survive a reload without another codec dependency.
+function audioBufferToWav(buffer) {
+  const channels = buffer.numberOfChannels;
+  const size = buffer.length * channels * 2;
+  const bytes = new ArrayBuffer(44 + size);
+  const view = new DataView(bytes);
+  const write = (offset, text) => [...text].forEach((char, i) => view.setUint8(offset + i, char.charCodeAt(0)));
+  write(0, 'RIFF'); view.setUint32(4, 36 + size, true); write(8, 'WAVE');
+  write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true); view.setUint32(24, buffer.sampleRate, true);
+  view.setUint32(28, buffer.sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true); view.setUint16(34, 16, true);
+  write(36, 'data'); view.setUint32(40, size, true);
+  const data = Array.from({ length: channels }, (_, ch) => buffer.getChannelData(ch));
+  let offset = 44;
+  for (let i = 0; i < buffer.length; i++) {
+    for (let ch = 0; ch < channels; ch++, offset += 2) {
+      const value = Math.max(-1, Math.min(1, data[ch][i]));
+      view.setInt16(offset, Math.round(value * (value < 0 ? 32768 : 32767)), true);
+    }
+  }
+  return new Blob([bytes], { type: 'audio/wav' });
+}
+
 // Load OCR only when a photo is selected; recognition runs locally in a worker.
 let ocrLibraryPromise = null;
 function loadOcrLibrary() {
@@ -681,7 +733,7 @@ function DragHandle({ pos, color, label, dragKey, size, edge, onStart }) {
 
 const MIN_SEG_SEC = 0.1;
 
-function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, savedTrimEnd, onNext, onBack }) {
+function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, savedTrimEnd, onNext, onBack, onReRecord }) {
   const n = poem.lines.length;
   const [dividers,  setDividers]  = useState(() => savedDividers  || Array.from({length:n-1},(_,i)=>(i+1)/n));
   const [trimStart, setTrimStart] = useState(() => savedTrimStart ?? 0);
@@ -812,11 +864,13 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
     src.onended = () => setPlaying(p => p===idx ? null : p);
     srcRef.current=src; setPlaying(idx);
   };
+  const currentSegments = () => {
+    const bounds=[trimStart,...dividers,trimEnd], dur=audioBuffer.duration;
+    return poem.lines.map((_,i)=>({ start:bounds[i]*dur, end:bounds[i+1]*dur }));
+  };
   const saveAndNext = () => {
     stopAudio();
-    const bounds=[trimStart,...dividers,trimEnd], dur=audioBuffer.duration;
-    const segs=poem.lines.map((_,i)=>({ start:bounds[i]*dur, end:bounds[i+1]*dur }));
-    onNext(segs, dividers, trimStart, trimEnd);
+    onNext(currentSegments(), dividers, trimStart, trimEnd);
   };
 
   const col2 = { gridColumn:2, padding:'0 20px' };
@@ -881,8 +935,10 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
         {poem.lines.map((line,i) => {
           const active=playing===i, color=segColors[i%segColors.length];
           return (
-            <button key={i} onClick={()=>active?stopAudio():playSegment(i)}
+            <div key={i} style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <button onClick={()=>active?stopAudio():playSegment(i)}
               style={{ display:'flex', alignItems:'center', gap:12, padding:'14px 16px', width:'100%',
+                       flex:1, minWidth:0,
                        background:active?color+'0.14)':C.card, border:`2px solid ${active?color+'0.7)':C.border}`,
                        borderRadius:15, cursor:'pointer', textAlign:'left', transition:'all 0.15s' }}>
               <span style={{ width:28, height:28, borderRadius:8, background:color+'0.18)',
@@ -891,12 +947,18 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
               <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.4 }}>{line}</span>
               <span style={{ fontSize:18, color:active?color+'1)':C.muted }}>{active?'⏹':'▶'}</span>
             </button>
+            <button disabled={!audioBuffer} aria-label={`Перезаписать строку ${i + 1}: ${line}`}
+              title="Перезаписать строку"
+              onClick={() => { stopAudio(); onReRecord(i, currentSegments()); }}
+              style={{ width:44, height:44, flexShrink:0, borderRadius:13, border:`2px solid ${C.border}`,
+                       background:C.card, color:C.coral, fontSize:20, cursor:'pointer' }}>🎙</button>
+            </div>
           );
         })}
       </div>
 
       <div style={{ ...col2, paddingTop:12, paddingBottom:40 }}>
-        <button onClick={saveAndNext}
+        <button onClick={saveAndNext} disabled={!audioBuffer}
           style={{ width:'100%', padding:'18px', fontSize:17, fontWeight:800,
                    background:C.coral, color:'white', border:'none', borderRadius:18, cursor:'pointer' }}>
           Перейти к практике →
@@ -909,7 +971,7 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
 /* ═══════════════════════════════════════════════════════
    SCREEN 4 — PRACTICE
 ═══════════════════════════════════════════════════════ */
-function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
+function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment, onReRecord }) {
   const [playing,    setPlaying]   = useState(null); // null | 'all' | 'sel' | idx
   const [activeIdx,  setActiveIdx] = useState(null);
   const [selected,   setSelected]  = useState(new Set());
@@ -939,6 +1001,7 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
   const stopAll = () => {
     stoppingRef.current = true;
     cancelAnimationFrame(rafRef.current);
+    if (srcRef.current) { srcRef.current.onended = null; try { srcRef.current.stop(); } catch {} }
     srcsRef.current.forEach(s => { try { s.stop(); } catch {} });
     srcsRef.current = [];
     srcRef.current = null;
@@ -1081,8 +1144,14 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
                                 fontSize:13, fontWeight:900, color:color+'1)' }}>
                     {i+1}
                   </div>
-                  <span style={{ flex:1, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.45 }}>
+                  <span style={{ flex:1, minWidth:0, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.45 }}>
                     {line}
+                    <button disabled={!audioBuffer} aria-label={`Перезаписать строку ${i + 1}: ${line}`}
+                      onClick={event => { event.stopPropagation(); stopAll(); onReRecord(i, segments); }}
+                      style={{ display:'block', marginTop:6, padding:'4px 0', border:'none', background:'none',
+                               fontSize:12, fontWeight:800, color:C.coral, cursor:'pointer', textAlign:'left' }}>
+                      🎙 Перезаписать
+                    </button>
                   </span>
                   <div style={{ width:22, height:22, borderRadius:6, flexShrink:0,
                                 border:`2.5px solid ${isSel ? color+'1)' : C.border}`,
@@ -1147,6 +1216,152 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
 }
 
 /* ─── Shared micro-components ─────────────────────────── */
+function LineRecorder({ line, index, onSave, onClose }) {
+  const [phase, setPhase] = useState('ready');
+  const [seconds, setSeconds] = useState(0);
+  const [blob, setBlob] = useState(null);
+  const [error, setError] = useState('');
+  const recorderRef = useRef(null);
+  const streamRef = useRef(null);
+  const timerRef = useRef(null);
+  const aliveRef = useRef(true);
+  const busyRef = useRef(false);
+  const dialogRef = useRef(null);
+  const previewRef = useRef(null);
+  const previousFocusRef = useRef(document.activeElement);
+  const [url, setUrl] = useState(null);
+
+  const releaseMic = () => {
+    clearInterval(timerRef.current);
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+  };
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (recorderRef.current) {
+        recorderRef.current.onstop = null;
+        recorderRef.current.ondataavailable = null;
+        recorderRef.current.onerror = null;
+        if (recorderRef.current.state !== 'inactive') recorderRef.current.stop();
+      }
+      releaseMic();
+      previousFocusRef.current?.focus();
+    };
+  }, []);
+  useEffect(() => {
+    if (!blob) { setUrl(null); return; }
+    const nextUrl = URL.createObjectURL(blob);
+    setUrl(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [blob]);
+  useEffect(() => {
+    if (!dialogRef.current?.contains(document.activeElement))
+      dialogRef.current?.querySelector('button:not(:disabled)')?.focus();
+  }, [phase]);
+
+  const start = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    previewRef.current?.pause();
+    setError(''); setPhase('requesting');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!aliveRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
+      streamRef.current = stream;
+      const mime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm']
+        .find(type => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const chunks = [];
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      recorder.onstop = () => {
+        releaseMic(); busyRef.current = false;
+        if (!aliveRef.current) return;
+        const result = new Blob(chunks, { type: recorder.mimeType });
+        if (!result.size) {
+          setError('Запись пустая. Попробуй ещё раз.'); setPhase('ready'); return;
+        }
+        setBlob(result); setPhase('done');
+      };
+      recorder.onerror = () => {
+        recorder.onstop = null;
+        releaseMic(); busyRef.current = false;
+        if (aliveRef.current) {
+          setError('Не удалось записать строку. Попробуй ещё раз.'); setPhase('ready');
+        }
+      };
+      recorderRef.current = recorder;
+      recorder.start(100);
+      setBlob(null); setSeconds(0); setPhase('recording');
+      timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+    } catch (e) {
+      releaseMic(); busyRef.current = false;
+      if (aliveRef.current) {
+        setError('Не удалось включить микрофон: ' + e.message); setPhase(blob ? 'done' : 'ready');
+      }
+    }
+  };
+  const stop = () => {
+    if (recorderRef.current?.state !== 'recording') return;
+    setPhase('processing');
+    clearInterval(timerRef.current);
+    recorderRef.current.stop();
+  };
+  const save = async () => {
+    if (busyRef.current || !blob) return;
+    busyRef.current = true;
+    previewRef.current?.pause();
+    setError(''); setPhase('saving');
+    try { await onSave(blob); }
+    catch (e) {
+      if (aliveRef.current) { setError(e.message || 'Не удалось сохранить запись. Попробуй ещё раз.'); setPhase('done'); }
+    } finally { busyRef.current = false; }
+  };
+  const buttonStyle = { padding:'13px 16px', border:'none', borderRadius:14,
+    fontSize:15, fontWeight:800, cursor:'pointer' };
+
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:30, background:'rgba(42,37,32,0.5)',
+                  display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="line-recorder-title"
+        onKeyDown={event => {
+          if (event.key === 'Escape' && phase !== 'saving') { event.stopPropagation(); onClose(); }
+          if (event.key === 'Tab') {
+            const buttons = [...dialogRef.current.querySelectorAll('button:not(:disabled), audio[controls]')];
+            const first = buttons[0], last = buttons[buttons.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+          }
+        }}
+        style={{ width:'100%', maxWidth:480, maxHeight:'90vh', overflowY:'auto', padding:24,
+                 borderRadius:22, background:C.card, display:'flex', flexDirection:'column', gap:16 }}>
+        <h2 id="line-recorder-title" style={{ fontSize:21, fontWeight:900 }}>Перезаписать строку {index + 1}</h2>
+        <p style={{ fontSize:17, lineHeight:1.5 }}>{line}</p>
+        <p style={{ fontSize:13, color:C.muted }}>Прочитай только эту строку. Прослушай запись и нажми «Заменить строку».</p>
+        <div role="status" aria-live="polite" style={{ fontWeight:800, color:C.coral }}>
+          {phase === 'requesting' ? 'Включаем микрофон…' : phase === 'recording' ? `● Запись ${fmtTime(seconds)}`
+            : phase === 'processing' ? 'Обрабатываем запись…' : phase === 'saving' ? 'Сохраняем…' : ''}
+        </div>
+        {url && <audio ref={previewRef} controls src={url} style={{ width:'100%' }} />}
+        {error && <p role="alert" style={{ fontSize:14, color:C.coral }}>{error}</p>}
+        <div style={{ display:'flex', flexWrap:'wrap', gap:10 }}>
+          {(phase === 'ready' || phase === 'done') && <button autoFocus onClick={start}
+            style={{ ...buttonStyle, background:C.coral, color:'white' }}>
+            {phase === 'done' ? 'Записать ещё раз' : '🎙 Записать строку'}
+          </button>}
+          {phase === 'recording' && <button autoFocus onClick={stop}
+            style={{ ...buttonStyle, background:C.coral, color:'white' }}>⏹ Остановить</button>}
+          {phase === 'done' && <button onClick={save}
+            style={{ ...buttonStyle, background:C.teal, color:'white' }}>Заменить строку</button>}
+          <button onClick={onClose} disabled={phase === 'saving'}
+            style={{ ...buttonStyle, background:C.light, color:C.text, opacity:phase === 'saving' ? 0.5 : 1 }}>Отмена</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BackBtn({ onClick }) {
   return (
     <button onClick={onClick}
@@ -1182,6 +1397,8 @@ function App() {
   const [dividers,    setDividers]    = useState(null);
   const [trimStart,   setTrimStart]   = useState(null);
   const [trimEnd,     setTrimEnd]     = useState(null);
+  const [lineRecording, setLineRecording] = useState(null);
+  const [audioRevision, setAudioRevision] = useState(0);
 
   // Restore last session
   useEffect(() => {
@@ -1217,6 +1434,21 @@ function App() {
   }, [poem, screen]);
 
   const go = (scr) => setScreen(scr);
+  const reRecordLine = (index, currentSegments) => setLineRecording({ index, segments:currentSegments });
+  const saveLineRecording = async (blob) => {
+    const ac = new AudioContext({ sampleRate: audioBuffer.sampleRate });
+    try {
+      const recording = await ac.decodeAudioData(await blob.arrayBuffer());
+      if (recording.duration < MIN_SEG_SEC) throw new Error('Запись слишком короткая. Прочитай строку целиком и попробуй ещё раз.');
+      const result = replaceLineAudio(ac, audioBuffer, recording, lineRecording.segments, lineRecording.index);
+      await DB.save(poem.id, audioBufferToWav(result.buffer));
+      setAudioBuffer(result.buffer);
+      setSegments(result.segments); setDividers(result.dividers);
+      setTrimStart(result.trimStart); setTrimEnd(result.trimEnd);
+      setAudioRevision(revision => revision + 1);
+      setLineRecording(null);
+    } finally { await ac.close().catch(() => {}); }
+  };
 
   let content;
   if (screen === 'input') content = (
@@ -1241,15 +1473,15 @@ function App() {
       onBack={() => go('input')} />
   );
   else if (screen === 'segment') content = (
-    <SegmentScreen poem={poem} audioBuffer={audioBuffer}
+    <SegmentScreen key={audioRevision} poem={poem} audioBuffer={audioBuffer}
       savedDividers={dividers} savedTrimStart={trimStart} savedTrimEnd={trimEnd}
       onNext={(segs, divs, ts, te) => { setSegments(segs); setDividers(divs); setTrimStart(ts); setTrimEnd(te); go('practice'); }}
-      onBack={() => go('record')} />
+      onBack={() => go('record')} onReRecord={reRecordLine} />
   );
   else if (screen === 'practice') content = (
     <PracticeScreen poem={poem} audioBuffer={audioBuffer} segments={segments}
       onBack={() => go('segment')}
-      onReSegment={() => go('segment')} />
+      onReSegment={() => go('segment')} onReRecord={reRecordLine} />
   );
 
   const deployedAt = (() => {
@@ -1260,7 +1492,9 @@ function App() {
 
   return (
     <>
-      {content}
+      <div inert={lineRecording ? '' : undefined}>{content}</div>
+      {lineRecording && <LineRecorder line={poem.lines[lineRecording.index]} index={lineRecording.index}
+        onSave={saveLineRecording} onClose={() => setLineRecording(null)} />}
       <div style={{ position:'fixed', bottom:6, right:8, fontSize:10,
                     color:C.muted, opacity:0.45, pointerEvents:'none',
                     fontVariantNumeric:'tabular-nums', userSelect:'none' }}>
