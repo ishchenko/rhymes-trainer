@@ -971,7 +971,7 @@ function SegmentScreen({ poem, audioBuffer, savedDividers, savedTrimStart, saved
 /* ═══════════════════════════════════════════════════════
    SCREEN 4 — PRACTICE
 ═══════════════════════════════════════════════════════ */
-function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment, onReRecord }) {
+function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment }) {
   const [playing,    setPlaying]   = useState(null); // null | 'all' | 'sel' | idx
   const [activeIdx,  setActiveIdx] = useState(null);
   const [selected,   setSelected]  = useState(new Set());
@@ -1146,12 +1146,6 @@ function PracticeScreen({ poem, audioBuffer, segments, onBack, onReSegment, onRe
                   </div>
                   <span style={{ flex:1, minWidth:0, fontSize:15, fontWeight:600, color:C.text, lineHeight:1.45 }}>
                     {line}
-                    <button disabled={!audioBuffer} aria-label={`Перезаписать строку ${i + 1}: ${line}`}
-                      onClick={event => { event.stopPropagation(); stopAll(); onReRecord(i, segments); }}
-                      style={{ display:'block', marginTop:6, padding:'4px 0', border:'none', background:'none',
-                               fontSize:12, fontWeight:800, color:C.coral, cursor:'pointer', textAlign:'left' }}>
-                      🎙 Перезаписать
-                    </button>
                   </span>
                   <div style={{ width:22, height:22, borderRadius:6, flexShrink:0,
                                 border:`2.5px solid ${isSel ? color+'1)' : C.border}`,
@@ -1481,7 +1475,7 @@ function App() {
   else if (screen === 'practice') content = (
     <PracticeScreen poem={poem} audioBuffer={audioBuffer} segments={segments}
       onBack={() => go('segment')}
-      onReSegment={() => go('segment')} onReRecord={reRecordLine} />
+      onReSegment={() => go('segment')} />
   );
 
   const deployedAt = (() => {
